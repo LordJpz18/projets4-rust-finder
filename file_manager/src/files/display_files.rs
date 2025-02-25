@@ -6,7 +6,7 @@ pub fn print_from_dir(path: &str) -> Result<(), walkdir::Error> // Eventually ad
                                                                 // later
 {
 
-    for entry in WalkDir::new(path).max_depth(1).into_iter() {
+    for entry in WalkDir::new(path).max_depth(3).into_iter() {
         match entry {
             Ok(dir_entry) => {
                 let name = dir_entry.file_name().to_string_lossy();

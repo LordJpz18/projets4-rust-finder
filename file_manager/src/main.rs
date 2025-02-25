@@ -1,54 +1,20 @@
 use std::path::Path;
-
+use std::time::Instant;
 mod files;
 use files::display_files::print_from_dir;
-
+mod research;
+use research::{
+    find::find_file,
+    find::build_file_tree,
+    find::find_file_btree
+};
 use file_manager::files::my_functions::*;
 use std::io;
 
-/*
-fn main() {
-    // Example : go from root ("/" sur Unix, "C:\" sur Windows)
-    let root = if cfg!(target_os = "windows") {
-        "C:\\"
-    } else {
-        "/"
-    };
 
-    match print_dir(root) {
-        Ok(()) => println!("End of traversal."),
-        Err(e) => eprintln!("Errors encountered. : {}", e),
-    }
-}
-*/
+//Clémence's Tests
+//com
 fn main() {
-    // Utiliser le dossier personnel comme point de départ (équivalent à ~/)
-    let path = std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
-    let dossiers = ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"];
-    for dossier in dossiers {
-        let chemin = Path::new(&path).join(dossier); 
-        match chemin.to_str() {
-            Some(chemin_str) => {
-                //println!("Contenu de {} :", dossier); // Optional: header for clarity
-                if let Err(e) = print_from_dir(chemin_str) {
-                    eprintln!("Error in {}: {}", dossier, e);
-                }
-                println!(); // Blank line between folders
-            }
-            None => eprintln!("Invalid path for {} (non-UTF-8)", dossier),
-        }       
-    }
-    //println!("Dossiers pertinents dans {} :", path);
-    //if let Err(e) = print_dir(&path) {
-     //   eprintln!("Erreur : {}", e);
-    //}
-
-    /* Optionnel : lister les volumes montés
-    println!("\nVolumes montés :");
-    if let Err(e) = print_dir("/Volumes") {
-        eprintln!("Erreur : {}", e);
-    }
-    */
     let mut permissions_vec = Vec::new();
 
     loop
@@ -98,3 +64,111 @@ fn main() {
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+//My Test (JP) 1st
+fn main2() {
+    // Utiliser le dossier personnel comme point de départ (équivalent à ~/)
+    let path = std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
+    //let dossiers = ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"];
+    //for dossier in dossiers {
+        let chemin = Path::new(&path).join("Documents"); 
+        match chemin.to_str() {
+            Some(chemin_str) => {
+                //println!("Contenu de {} :", dossier); // Optional: header for clarity
+                if let Err(e) = print_from_dir(chemin_str) {
+                    eprintln!("Error in dossier: {}", e);
+                }
+                println!();
+            }
+            None => eprintln!("Invalid path for dossiers (non-UTF-8)"),
+        }       
+    }
+
+
+
+//Tets search
+fn main3() {
+    let search_file = "attestation.pdf";
+    println!("Searching for '{}'", search_file);
+    let start = Instant::now();
+    let results = find_file(search_file);
+    let duration = start.elapsed();
+    
+    println!("Linear search time: {} ms", duration.as_millis());
+    
+    let bt = build_file_tree();
+    let s2 = Instant::now();
+    let res = find_file_btree(search_file, &bt);
+    let d2 = s2.elapsed();
+
+    println!("BTree search time: {} ms", d2.as_millis());
+
+    if res.is_empty() {
+        println!("No similar files found.");
+    } else if res.len() == 1 && res[0].ends_with(search_file) {
+        println!("Exact match found: {}", res[0]);
+    } else {
+        println!("Similar files found (>80% similarity):");
+        for path in &res {
+            println!("- {}", path);
+        }
+    }
+}
+
+
+
+
+//end com
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
