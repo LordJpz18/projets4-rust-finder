@@ -2,6 +2,7 @@ use std::fs::{self, File, create_dir};
 use std::path::Path;
 use std::io;
 
+#[allow(dead_code)]
 pub struct PermissionsFichier 
 {
     pub name: String,
@@ -10,7 +11,6 @@ pub struct PermissionsFichier
     pub is_delete: bool,
 }
 
-#[allow(dead_code)]
 impl PermissionsFichier 
 {
     pub fn new(name: &str) -> Self 
@@ -54,6 +54,13 @@ impl PermissionsFichier
             println!("Delete : No");
         }
     }
+
+    pub fn update_perms(&mut self, read: bool, write: bool, delete: bool) 
+    {
+        self.is_read = read;
+        self.is_write = write;
+        self.is_delete = delete;
+    }
 }
 
 
@@ -77,7 +84,7 @@ pub fn check_existence(path: &str) -> bool
 
 pub fn create_file_with_ext(permissions_vec: &mut Vec<PermissionsFichier>) 
 {
-    let extensions = ["png", "jpg", "rs", "c", "asm"];
+    let extensions = ["txt", "md", "rs", "c", "py","asm"];
 
     //Ask extension
     println!("Choose an extension among:");
@@ -151,13 +158,13 @@ pub fn create_file_with_ext(permissions_vec: &mut Vec<PermissionsFichier>)
     //add perms to the file
     permissions_vec.push(PermissionsFichier::new(&path));
 
-    println!("File '{}' successfully created", path);
+    println!("File successfully '{}' created", path);
 }
 
 
 pub fn create_file(permissions_vec: &mut Vec<PermissionsFichier>) 
 {
-    println!("Enter file name (without extension)");
+    println!("Enter file name");
 
     let mut name = String::new();
 
@@ -171,36 +178,19 @@ pub fn create_file(permissions_vec: &mut Vec<PermissionsFichier>)
         return;
     }
 
-    println!("Enter extension ");
-
-    let mut extension = String::new();
-
-    io::stdin().read_line(&mut extension).unwrap();
-
-    let extension = extension.trim();
-
-    if !is_name_valid(extension) 
-    {
-        println!("invalid extension !");
-        return;
-    }
-
-    let path = name.to_string() + "." + &extension;
-
-
     //ckeck existence
-    if check_existence(&path)
+    if check_existence(&name)
     {
-        println!("File '{}' already exists!", path);
+        println!("File '{}' already exists!", name);
         return;
     }
 
     //Create file
-    let _ =File::create(&path);
+    let _ =File::create(&name);
 
     //add perms to file
-    permissions_vec.push(PermissionsFichier::new(&path));
-    println!("File '{}' created", path);
+    permissions_vec.push(PermissionsFichier::new(&name));
+    println!("File '{}' created", name);
 }
 
 
@@ -236,7 +226,7 @@ pub fn delete_file()
     io::stdin().read_line(&mut name).unwrap();
     let name = name.trim();
 
-    let bin_path = format!("bin/{}", name);
+    let bin_path = format!("trash/{}", name);
 
     if check_existence(&bin_path) 
     {
@@ -254,9 +244,9 @@ pub fn delete_file()
     {
         if check_existence(name) 
         {
-            let _ =fs::create_dir_all("bin");
+            let _ =fs::create_dir_all("trash");
             let _ = fs::rename(name, &bin_path);
-            println!("File moved to bin");
+            println!("File moved to trash");
         } 
         else 
         {

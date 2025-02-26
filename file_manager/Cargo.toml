@@ -8,3 +8,16 @@ ignore = "0.4"
 jwalk = "0.8"
 walkdir = "2"
 colored = "2"
+
+[[bin]]
+name = "main1"
+path = "src/bin/main1.rs"
+
+[[bin]]
+name = "main2"
+path = "src/bin/main2.rs"
+
+[[bin]]
+name = "main3"
+path = "src/bin/main3.rs"
+
