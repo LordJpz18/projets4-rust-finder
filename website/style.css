@@ -9,10 +9,21 @@ body {
 header {
     background-color: #2c3e50;
     color: white;
-    text-align: center;
     padding: 20px;
+    display: flex; /* Utilise Flexbox pour aligner logo et texte */
+    align-items: center; /* Centre verticalement */
 }
 
+.logo {
+    width: 50px; /* Ajustez la taille selon votre logo */
+    height: 50px;
+    margin-right: 20px; /* Espace entre le logo et le texte */
+}
+
+.header-text {
+    flex-grow: 1; /* Le texte prend l'espace restant */
+    text-align: center; /* Centre le texte */
+}
 header h1 {
     margin: 0;
     font-size: 2.5em;
@@ -23,6 +34,8 @@ section {
     max-width: 1200px;
     margin: 0 auto;
 }
+
+
 
 h2 {
     color: #2c3e50;
