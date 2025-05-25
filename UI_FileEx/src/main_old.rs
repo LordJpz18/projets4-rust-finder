@@ -1,6 +1,6 @@
 use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
-use iced::{executor, Application, Command, Element, Length, Settings, Theme};
+use iced::{executor, Application, Command, Element, Length, Settings, Theme, Color};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -17,21 +17,6 @@ struct FileExplorer {
     selected_file: Option<PathBuf>,
     file_preview: Option<FilePreview>,
     system_locations: Vec<SystemLocation>,
-    file_name_input: String,
-    confirm_delete: Option<PathBuf>,
-    clipboard: Option<ClipboardItem>, // Nouveau champ pour le presse-papiers
-}
-
-#[derive(Debug, Clone)]
-struct ClipboardItem {
-    path: PathBuf,
-    operation: ClipboardOperation,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum ClipboardOperation {
-    Copy,
-    Cut,
 }
 
 #[derive(Debug, Clone)]
@@ -74,16 +59,6 @@ enum Message {
     ToggleDirectory(usize),
     FilePreviewLoaded(Option<FilePreview>),
     OpenFile(PathBuf),
-    CreateFile, 
-    CreateDirectory,
-    FileNameInputChanged(String),
-    DeleteFile(PathBuf),
-    ConfirmDeleteFile(PathBuf),
-    CancelDelete,
-    DeleteConfirmed(PathBuf),
-    CopyFile(PathBuf),    // Nouveau message pour copier
-    CutFile(PathBuf),     // Nouveau message pour couper
-    PasteFile,            // Nouveau message pour coller
 }
 
 #[derive(Debug, Clone)]
@@ -112,9 +87,6 @@ impl Application for FileExplorer {
                 selected_file: None,
                 file_preview: None,
                 system_locations: vec![],
-                file_name_input: String::new(),
-                confirm_delete: None,
-                clipboard: None, // Initialisation du presse-papiers
             },
             Command::batch(vec![
                 Command::perform(load_files(start_path.clone()), Message::FilesLoaded),
@@ -215,95 +187,6 @@ impl Application for FileExplorer {
                 
                 Command::none()
             }
-            //Input of file or directory
-            Message::FileNameInputChanged(new_name) => {
-                self.file_name_input = new_name;
-                Command::none()
-            }
-            Message::CreateFile => {
-                let path = self.current_path.join(&self.file_name_input);
-                std::fs::write(&path, "").ok();
-                self.file_name_input.clear(); // Vider le champ après création
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
-            }
-            
-            Message::CreateDirectory => {
-                let path = self.current_path.join(&self.file_name_input);
-                std::fs::create_dir_all(&path).ok();
-                self.file_name_input.clear(); // Vider le champ après création
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
-            }
-            Message::DeleteFile(path) => {
-                let _ = std::fs::remove_file(&path);
-                self.selected_file = None;
-                self.file_preview = None;
-            
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
-            }
-            Message::ConfirmDeleteFile(path) => {
-                self.confirm_delete = Some(path);
-                Command::none()
-            }
-            
-            Message::CancelDelete => {
-                self.confirm_delete = None;
-                Command::none()
-            }
-            
-            Message::DeleteConfirmed(path) => {
-                let _ = std::fs::remove_file(&path);
-                self.confirm_delete = None;
-                self.selected_file = None;
-                self.file_preview = None;
-            
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
-            }
-            
-            // Nouveaux gestionnaires de messages pour copier/couper/coller
-            Message::CopyFile(path) => {
-                self.clipboard = Some(ClipboardItem {
-                    path,
-                    operation: ClipboardOperation::Copy,
-                });
-                Command::none()
-            }
-            
-            Message::CutFile(path) => {
-                self.clipboard = Some(ClipboardItem {
-                    path,
-                    operation: ClipboardOperation::Cut,
-                });
-                Command::none()
-            }
-            
-            Message::PasteFile => {
-                if let Some(clipboard_item) = &self.clipboard {
-                    let source_path = &clipboard_item.path;
-                    let file_name = source_path.file_name().unwrap_or_default();
-                    let dest_path = self.current_path.join(file_name);
-                    
-                    match clipboard_item.operation {
-                        ClipboardOperation::Copy => {
-                            // Copier le fichier
-                            if source_path.is_file() {
-                                let _ = std::fs::copy(source_path, &dest_path);
-                            } else if source_path.is_dir() {
-                                // Pour les dossiers, on utiliserait une fonction récursive
-                                let _ = copy_dir_recursive(source_path, &dest_path);
-                            }
-                        }
-                        ClipboardOperation::Cut => {
-                            // Déplacer le fichier
-                            let _ = std::fs::rename(source_path, &dest_path);
-                            // Vider le presse-papiers après un déplacement
-                            self.clipboard = None;
-                        }
-                    }
-                    
-                    return Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded);
-                }
-                Command::none()
-            }
         }
     }
 
@@ -348,100 +231,12 @@ impl Application for FileExplorer {
 
 impl FileExplorer {
     fn view_directory_structure(&self) -> Element<Message> {
-        
         let tree_title = text("Quick Access")
             .size(16)
             .horizontal_alignment(Horizontal::Center);
+        
         let mut dir_list = vec![tree_title.into()];
-
-        let file_name_input = text_input("Enter file name", &self.file_name_input)
-            .on_input(Message::FileNameInputChanged)
-            .on_submit(Message::CreateFile)
-            .padding(10);
-
-        //Button to create a file
-        let create_buttons = row![
-            button("Create File").on_press(Message::CreateFile),
-            button("Create Directory").on_press(Message::CreateDirectory)
-        ]
-        .spacing(10);
-
-        dir_list.push(
-            container(file_name_input)
-                .padding(5)
-                .width(Length::Fill)
-                .into()
-        );
-        dir_list.push(
-            container(create_buttons)
-                .padding(5)
-                .width(Length::Fill)
-                .into()
-        );
-
-        // Section copier/couper/coller
-        if let Some(selected_path) = &self.selected_file {
-            let clipboard_buttons = column![
-                row![
-                    button("Copy").on_press(Message::CopyFile(selected_path.clone())),
-                    button("Cut").on_press(Message::CutFile(selected_path.clone()))
-                ]
-                .spacing(5),
-                if self.clipboard.is_some() {
-                    button("Paste")
-                        .on_press(Message::PasteFile)
-                        .style(iced::theme::Button::Positive)
-                } else {
-                    button("")
-                        .style(iced::theme::Button::Secondary)
-                }
-            ]
-            .spacing(5);
-
-            dir_list.push(
-                container(clipboard_buttons)
-                    .padding(5)
-                    .width(Length::Fill)
-                    .into()
-            );
-        } else if self.clipboard.is_some() {
-            // Afficher seulement le bouton coller si quelque chose est dans le presse-papiers
-            let paste_button = button("Paste")
-                .on_press(Message::PasteFile)
-                .style(iced::theme::Button::Positive);
-
-            dir_list.push(
-                container(paste_button)
-                    .padding(5)
-                    .width(Length::Fill)
-                    .into()
-            );
-        }
-
-        // Afficher les informations du presse-papiers
-        if let Some(clipboard_item) = &self.clipboard {
-            let operation_text = match clipboard_item.operation {
-                ClipboardOperation::Copy => "Copied:",
-                ClipboardOperation::Cut => "Cut:",
-            };
-            let file_name = clipboard_item.path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            
-            dir_list.push(
-                container(
-                    column![
-                        text(operation_text).size(12),
-                        text(file_name).size(10)
-                    ]
-                    .spacing(2)
-                )
-                .padding(5)
-                .width(Length::Fill)
-                .into()
-            );
-        }
-
+        
         // First, show system locations (disks and important user folders)
         for location in &self.system_locations {
             let icon = match location.location_type {
@@ -569,49 +364,31 @@ impl FileExplorer {
             
             let is_selected = self.selected_file.as_ref().map_or(false, |p| p == &entry.path);
             
-            if entry.path.is_dir() {
-                // Les dossiers gardent les boutons bleus
-                let row_content = row![
-                    text(format!("📁 {}", file_name))
-                        .width(Length::FillPortion(3)),
-                    text(size_text).width(Length::FillPortion(1)),
-                    text(modified_text).width(Length::FillPortion(2))
-                ]
-                .spacing(10);
-                
-                let btn = button(row_content)
+            let row_content = row![
+                text(format!("{} {}", if entry.path.is_dir() { "📁" } else { "📄" }, file_name))
+                    .width(Length::FillPortion(3)),
+                text(size_text).width(Length::FillPortion(1)),
+                text(modified_text).width(Length::FillPortion(2))
+            ]
+            .spacing(10);
+            
+            let btn = if entry.path.is_dir() {
+                button(row_content)
                     .on_press(Message::ChangeDirectory(entry.path.clone()))
-                    .width(Length::Fill);
-                
-                file_list.push(btn.into());
             } else {
-                // Les fichiers sont affichés comme du texte simple, cliquable
-                let text_style = if is_selected {
-                    iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0)) // Vert pour la sélection
-                } else {
-                    iced::theme::Text::Default
-                };
-                
-                let row_content = button(
-                    row![
-                        text(format!("📄 {}", file_name))
-                            .width(Length::FillPortion(3))
-                            .style(text_style),
-                        text(size_text)
-                            .width(Length::FillPortion(1))
-                            .style(text_style),
-                        text(modified_text)
-                            .width(Length::FillPortion(2))
-                            .style(text_style)
-                    ]
-                    .spacing(10)
-                )
-                .on_press(Message::FileSelected(entry.path.clone()))
-                .style(iced::theme::Button::Text) // Style de bouton transparent
-                .width(Length::Fill);
-                
-                file_list.push(row_content.into());
-            }
+                // Use a lighter blue for files
+                button(row_content)
+                    .on_press(Message::FileSelected(entry.path.clone()))
+                    .style(iced::theme::Button::Custom(Box::new(LighterBlueButton)))
+            };
+            
+            let styled_btn = if is_selected {
+                btn.style(iced::theme::Button::Positive)
+            } else {
+                btn
+            };
+            
+            file_list.push(styled_btn.width(Length::Fill).into());
         }
         
         scrollable(
@@ -659,45 +436,12 @@ impl FileExplorer {
                 }
             }
             
-            if let Some(path) = &self.confirm_delete {
-                
-                details.push(
-                    container(
-                        column![
-                            text("Are you sure you want to delete this file ?").size(16),
-                            text(path.file_name().unwrap_or_default().to_string_lossy()).size(14),
-                            row![
-                                button("Delete")
-                                    .on_press(Message::DeleteConfirmed(path.clone()))
-                                    .style(iced::theme::Button::Destructive),
-                                button("Cancel").on_press(Message::CancelDelete)
-                            ]
-                            .spacing(10)
-                        ]
-                        .spacing(10)
-                        .padding(10)
-                    )
-                    .style(iced::theme::Container::Box)
-                    .width(Length::Fill)
+            details.push(
+                button(text("Open File"))
+                    .on_press(Message::OpenFile(selected_path.clone()))
+                    .padding(5)
                     .into()
-                );
-            } 
-            else if let Some(selected_path) = &self.selected_file {
-                details.push(
-                    button(text("Open File"))
-                        .on_press(Message::OpenFile(selected_path.clone()))
-                        .padding(5)
-                        .into()
-                );
-            
-                details.push(
-                    button(text("Delete file"))
-                        .on_press(Message::ConfirmDeleteFile(selected_path.clone()))
-                        .padding(5)
-                        .style(iced::theme::Button::Destructive)
-                        .into()
-                );
-            }
+            );
             
             // Preview section
             details.push(text("Preview:").size(16).into());
@@ -745,8 +489,6 @@ impl FileExplorer {
             details.push(text("No file selected").into());
         }
         
-        
-        
         scrollable(
             container(
                 column(details)
@@ -759,25 +501,29 @@ impl FileExplorer {
     }
 }
 
-// Fonction pour copier récursivement un dossier
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !dst.exists() {
-        fs::create_dir_all(dst)?;
+// Custom button style for files (lighter blue)
+struct LighterBlueButton;
+
+impl iced::widget::button::StyleSheet for LighterBlueButton {
+    type Style = Theme;
+    
+    fn active(&self, style: &Self::Style) -> iced::widget::button::Appearance {
+        let mut appearance = style.active(&iced::theme::Button::Secondary);
+        appearance.background = Some(iced::Background::Color(Color::from_rgb(0.6, 0.8, 0.95)));
+        appearance
     }
     
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
+    fn hovered(&self, style: &Self::Style) -> iced::widget::button::Appearance {
+        let mut appearance = style.hovered(&iced::theme::Button::Secondary);
+        appearance.background = Some(iced::Background::Color(Color::from_rgb(0.7, 0.85, 0.98)));
+        appearance
     }
     
-    Ok(())
+    fn pressed(&self, style: &Self::Style) -> iced::widget::button::Appearance {
+        let mut appearance = style.pressed(&iced::theme::Button::Secondary);
+        appearance.background = Some(iced::Background::Color(Color::from_rgb(0.5, 0.75, 0.92)));
+        appearance
+    }
 }
 
 // Helper functions
