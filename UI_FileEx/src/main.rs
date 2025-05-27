@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use strsim::levenshtein;
 use walkdir::WalkDir;
+use regex::Regex;
 
 fn main() -> iced::Result {
     FileExplorer::run(Settings::default())
@@ -127,6 +128,12 @@ enum FilePreview {
     Text(String),
     Pdf(String),
     Other(String),
+}
+
+#[derive(Debug, Clone)]
+enum SearchType {
+    Fuzzy,
+    Regex,
 }
 
 impl Application for FileExplorer {
@@ -1178,79 +1185,125 @@ impl FileExplorer {
             "Personal",
         ];
 
-        for term in search_terms {
-            for (indexed_term, paths) in &self.file_index {
-                let distance = levenshtein(term, indexed_term) as f64;
-                let max_len = term.len().max(indexed_term.len()) as f64;
-                let mut score = 1.0 - (distance / max_len);
+        // Détecter si la recherche est une regex
+        let search_type = if search_terms.len() == 1 && search_terms[0].starts_with('/') && search_terms[0].ends_with('/') {
+            SearchType::Regex
+        } else {
+            SearchType::Fuzzy
+        };
 
-                if indexed_term == term {
-                    score *= 1.5;
-                }
-
-                if let Some(file_name) = paths[0].file_name() {
-                    let name = file_name.to_string_lossy().to_lowercase();
-                    if important_folders
-                        .iter()
-                        .any(|&folder| name.contains(folder))
-                    {
-                        score *= 1.3;
-                    }
-                }
-
-                if score >= 0.3 {
-                    for path in paths {
-                        if seen_paths.insert(path.clone()) {
-                            let file_name = path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_lowercase();
-
-                            let mut total_score = 0.0;
-                            let mut best_score: f64 = 0.0;
-                            let mut match_count = 0;
-
-                            for search_term in search_terms {
-                                let term_distance = levenshtein(search_term, &file_name) as f64;
-                                let term_max_len = search_term.len().max(file_name.len()) as f64;
-                                let mut term_score = 1.0 - (term_distance / term_max_len);
-
-                                if file_name.starts_with(search_term) {
-                                    term_score *= 1.2;
-                                }
-
-                                if let Some(parent) = path.parent() {
-                                    let parent_name = parent
+        match search_type {
+            SearchType::Regex => {
+                // Extraire le pattern regex entre les slashes
+                let pattern = &search_terms[0][1..search_terms[0].len()-1];
+                if let Ok(regex) = Regex::new(pattern) {
+                    for (indexed_term, paths) in &self.file_index {
+                        if regex.is_match(indexed_term) {
+                            for path in paths {
+                                if seen_paths.insert(path.clone()) {
+                                    let file_name = path
                                         .file_name()
                                         .unwrap_or_default()
                                         .to_string_lossy()
                                         .to_lowercase();
-                                    if important_folders
-                                        .iter()
-                                        .any(|&folder| parent_name.contains(folder))
-                                    {
-                                        term_score *= 1.1;
+
+                                    // Calculer un score basé sur la longueur de la correspondance
+                                    let matches: Vec<_> = regex.find_iter(&file_name).collect();
+                                    let score = if !matches.is_empty() {
+                                        let total_match_length: usize = matches.iter()
+                                            .map(|m| m.end() - m.start())
+                                            .sum();
+                                        (total_match_length as f64 / file_name.len() as f64).min(1.0)
+                                    } else {
+                                        0.0
+                                    };
+
+                                    if score >= 0.3 {
+                                        path_scores.insert(path.clone(), score);
                                     }
                                 }
-
-                                if file_name.contains(search_term) {
-                                    total_score += term_score;
-                                    match_count += 1;
-                                }
-                                best_score = best_score.max(term_score);
                             }
+                        }
+                    }
+                }
+            },
+            SearchType::Fuzzy => {
+                // Code existant pour la recherche floue
+                for term in search_terms {
+                    for (indexed_term, paths) in &self.file_index {
+                        let distance = levenshtein(term, indexed_term) as f64;
+                        let max_len = term.len().max(indexed_term.len()) as f64;
+                        let mut score = 1.0 - (distance / max_len);
 
-                            let final_score = if match_count > 0 {
-                                (total_score / match_count as f64) * 0.7 + (best_score * 0.3)
-                            } else {
-                                best_score
-                            };
+                        if indexed_term == term {
+                            score *= 1.5;
+                        }
 
-                            let final_score = final_score.min(1.0).max(0.0);
+                        if let Some(file_name) = paths[0].file_name() {
+                            let name = file_name.to_string_lossy().to_lowercase();
+                            if important_folders
+                                .iter()
+                                .any(|&folder| name.contains(folder))
+                            {
+                                score *= 1.3;
+                            }
+                        }
 
-                            if final_score >= 0.3 {
-                                path_scores.insert(path.clone(), final_score);
+                        if score >= 0.3 {
+                            for path in paths {
+                                if seen_paths.insert(path.clone()) {
+                                    let file_name = path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_lowercase();
+
+                                    let mut total_score = 0.0;
+                                    let mut best_score: f64 = 0.0;
+                                    let mut match_count = 0;
+
+                                    for search_term in search_terms {
+                                        let term_distance = levenshtein(search_term, &file_name) as f64;
+                                        let term_max_len = search_term.len().max(file_name.len()) as f64;
+                                        let mut term_score = 1.0 - (term_distance / term_max_len);
+
+                                        if file_name.starts_with(search_term) {
+                                            term_score *= 1.2;
+                                        }
+
+                                        if let Some(parent) = path.parent() {
+                                            let parent_name = parent
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy()
+                                                .to_lowercase();
+                                            if important_folders
+                                                .iter()
+                                                .any(|&folder| parent_name.contains(folder))
+                                            {
+                                                term_score *= 1.1;
+                                            }
+                                        }
+
+                                        if file_name.contains(search_term) {
+                                            total_score += term_score;
+                                            match_count += 1;
+                                        }
+                                        best_score = best_score.max(term_score);
+                                    }
+
+                                    let final_score = if match_count > 0 {
+                                        (total_score / match_count as f64) * 0.7 + (best_score * 0.3)
+                                    } else {
+                                        best_score
+                                    };
+
+                                    let final_score = final_score.min(1.0).max(0.0);
+
+                                    if final_score >= 0.3 {
+                                        path_scores.insert(path.clone(), final_score);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1547,19 +1600,19 @@ fn format_size(size: u64) -> String {
 
 fn format_time(time: SystemTime) -> String {
     use std::time::{Duration, UNIX_EPOCH};
-
+    
     let duration = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0));
     let secs = duration.as_secs();
-
+    
     let seconds = secs % 60;
     let minutes = (secs / 60) % 60;
     let hours = (secs / 3600) % 24;
     let days = (secs / 86400) % 30;
     let months = (secs / 2592000) % 12;
-    let years = secs / 31104000;
-
+    let years = secs / 31536000; // Correction : utilisation de 365 jours au lieu de 360
+    
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         1970 + years,
