@@ -245,3 +245,42 @@ footer {
     opacity: 1;
     transform: translateY(0);
 }
+
+.tech-specs-container {
+    text-align: center;
+    padding: 2rem;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    margin: 2rem auto;
+    max-width: 800px;
+}
+
+.button-container {
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+}
+
+.tech-specs-button {
+    display: inline-block;
+    padding: 1rem 2rem;
+    background-color: #4a90e2;
+    color: white;
+    text-decoration: none;
+    border-radius: 5px;
+    transition: all 0.3s ease;
+    font-weight: bold;
+    min-width: 250px;
+}
+
+.tech-specs-button:hover {
+    background-color: #357abd;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
+.tech-specs-button i {
+    margin-right: 8px;
+}
