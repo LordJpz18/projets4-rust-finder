@@ -1,109 +1,106 @@
-use rayon::prelude::*;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use levenshtein::levenshtein;
+use notify::{
+    Config, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
+};
+use regex::Regex;
+use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
+use std::time::Duration;
 use walkdir::WalkDir;
 
-// Fonctions inchangées
-pub fn has_execute_permission(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+pub fn initialize_db(conn: &Connection) {
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS files USING fts5(name, path);",
+        [],
+    )
+    .unwrap();
 }
 
-pub fn is_binary_executable(path: &Path) -> bool {
-    let mut header = [0; 4];
-    fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut header))
-        .is_ok()
-        && (header == [0x7F, b'E', b'L', b'F']
-            || header == [0xFE, 0xED, 0xFA, 0xCE]
-            || header == [0xFE, 0xED, 0xFA, 0xCF])
+pub fn insert_file(conn: &Connection, path: &Path) {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let path_str = path.to_string_lossy();
+        conn.execute(
+            "INSERT INTO files (name, path) VALUES (?1, ?2);",
+            params![name, path_str],
+        )
+        .ok();
+    }
 }
 
-pub fn has_shebang(path: &Path) -> bool {
-    let mut shebang = [0; 2];
-    fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut shebang))
-        .is_ok()
-        && shebang == [b'#', b'!']
+pub fn remove_file(conn: &Connection, path: &Path) {
+    let path_str = path.to_string_lossy();
+    conn.execute("DELETE FROM files WHERE path = ?1;", params![path_str])
+        .ok();
 }
 
-pub fn is_application(path: &Path) -> bool {
-    path.is_file()
-        && (has_execute_permission(path) || is_binary_executable(path) || has_shebang(path))
-}
-
-pub fn get_modified_time(path: &Path) -> Option<u64> {
-    fs::metadata(path).ok().map(|meta| meta.mtime() as u64)
-}
-
-// Dossiers pertinents pour utilisateurs non développeurs
-fn get_relevant_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    vec![
-        dirs::document_dir().unwrap_or_else(|| home.join("Documents")),
-        dirs::download_dir().unwrap_or_else(|| home.join("Downloads")),
-        dirs::desktop_dir().unwrap_or_else(|| home.join("Desktop")),
-        dirs::picture_dir().unwrap_or_else(|| home.join("Pictures")),
-        dirs::video_dir().unwrap_or_else(|| home.join("Videos")),
+pub fn initial_scan(conn: &Connection, root: &Path) {
+    let ignored_dirs: HashSet<&str> = [
+        "/proc",
+        "/sys",
+        "/dev",
+        "c:\\windows",
+        "c:\\program files",
+        "c:\\program files (x86)",
+        "c:\\programdata",
+        "c:\\$recycle.bin",
+        "c:\\system volume information",
+        "c:\\recovery",
+        "c:\\perflogs",
     ]
+    .into_iter()
+    .collect();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.is_file() && !ignored_dirs.iter().any(|d| path.starts_with(d)) {
+            insert_file(conn, path);
+        }
+    }
 }
 
-pub fn find_recent_files() -> Vec<(PathBuf, u64)> {
-    let mut heap: BinaryHeap<Reverse<(u64, PathBuf)>> = BinaryHeap::new();
-    let relevant_dirs = get_relevant_dirs();
+pub fn find(conn: &Connection, query: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let mut stmt = conn
+        .prepare("SELECT path FROM files WHERE name MATCH ?1;")
+        .unwrap();
+    let mut rows = stmt.query(params![query]).unwrap();
 
-    let paths: Vec<PathBuf> = relevant_dirs
-        .into_par_iter()
-        .flat_map(|dir| {
-            WalkDir::new(dir)
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|entry| entry.path().to_path_buf())
-                .collect::<Vec<PathBuf>>()
-        })
-        .collect();
+    while let Some(row) = rows.next().unwrap() {
+        results.push(row.get::<_, String>(0).unwrap());
+    }
 
-    for path in paths {
-        if let Some(modified) = get_modified_time(&path) {
-            heap.push(Reverse((modified, path)));
-            if heap.len() > 75 {
-                heap.pop();
+    if results.is_empty() {
+        let regex = Regex::new(query).unwrap();
+        let mut stmt = conn.prepare("SELECT name, path FROM files;").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+
+        while let Some(row) = rows.next().unwrap() {
+            let name: String = row.get(0).unwrap();
+            let path: String = row.get(1).unwrap();
+            if regex.is_match(&name) {
+                results.push(path);
             }
         }
     }
 
-    heap.into_sorted_vec()
-        .into_iter()
-        .map(|Reverse((modified, path))| (path, modified))
-        .collect()
-}
+    if results.is_empty() {
+        let mut stmt = conn.prepare("SELECT name, path FROM files;").unwrap();
+        let mut rows = stmt.query([]).unwrap();
 
-// Charge les chemins dans une Vec<String> à partir des dossiers pertinents
-pub fn build_file_tree() -> Vec<String> {
-    let relevant_dirs = get_relevant_dirs();
-    relevant_dirs
-        .into_iter()
-        .flat_map(|dir| {
-            WalkDir::new(dir)
-                .max_depth(5) // Profondeur raisonnable pour inclure les sous-dossiers
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .map(|entry| entry.path().to_string_lossy().into_owned())
-                .collect::<Vec<String>>()
-        })
-        .collect()
-}
+        while let Some(row) = rows.next().unwrap() {
+            let name: String = row.get(0).unwrap();
+            let path: String = row.get(1).unwrap();
+            if levenshtein(&name, query) <= 2 {
+                results.push(path);
+            }
+        }
+    }
 
-// Recherche dans une Vec<String>
-pub fn find_file_btree(query: &str, tree: &[String]) -> Vec<String> {
-    let query_lower = query.to_lowercase();
-    tree.iter()
-        .filter(|path| path.to_lowercase().contains(&query_lower))
-        .cloned()
-        .collect()
+    results
 }
