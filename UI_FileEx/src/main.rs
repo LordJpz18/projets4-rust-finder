@@ -3,7 +3,11 @@ use iced::widget::{button, column, container, image, row, scrollable, text, text
 use iced::{executor, Application, Command, Element, Length, Settings, Theme};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration, Instant};
+use strsim::levenshtein;
+use walkdir::WalkDir;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 fn main() -> iced::Result {
     FileExplorer::run(Settings::default())
@@ -19,7 +23,13 @@ struct FileExplorer {
     system_locations: Vec<SystemLocation>,
     file_name_input: String,
     confirm_delete: Option<PathBuf>,
-    clipboard: Option<ClipboardItem>, // Nouveau champ pour le presse-papiers
+    clipboard: Option<ClipboardItem>,
+    show_hidden: bool,
+    search_input: String,
+    search_results: Vec<SearchResult>,
+    search_cache: HashMap<String, (Vec<SearchResult>, Instant)>,
+    file_index: HashMap<String, Vec<PathBuf>>,
+    last_index_update: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,11 +57,27 @@ enum SystemLocationType {
     UserFolder,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum FileType {
+    Directory,
+    Code,
+    PDF,
+    Audio,
+    Image,
+    Video,
+    Text,
+    Word,
+    Excel,
+    PowerPoint,
+    Other,
+}
+
 #[derive(Debug, Clone)]
 struct FileEntry {
     path: PathBuf,
     size: u64,
     modified: Option<SystemTime>,
+    file_type: FileType,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +86,12 @@ struct DirectoryEntry {
     name: String,
     depth: usize,
     expanded: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SearchResult {
+    path: PathBuf,
+    score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -74,16 +106,19 @@ enum Message {
     ToggleDirectory(usize),
     FilePreviewLoaded(Option<FilePreview>),
     OpenFile(PathBuf),
-    CreateFile, 
+    CreateFile,
     CreateDirectory,
     FileNameInputChanged(String),
     DeleteFile(PathBuf),
     ConfirmDeleteFile(PathBuf),
     CancelDelete,
     DeleteConfirmed(PathBuf),
-    CopyFile(PathBuf),    // Nouveau message pour copier
-    CutFile(PathBuf),     // Nouveau message pour couper
-    PasteFile,            // Nouveau message pour coller
+    CopyFile(PathBuf),
+    CutFile(PathBuf),
+    PasteFile,
+    ToggleHiddenFiles,
+    SearchInputChanged(String),
+    ClearSearch,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +137,7 @@ impl Application for FileExplorer {
 
     fn new(_: ()) -> (Self, Command<Self::Message>) {
         let start_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        
+
         (
             Self {
                 current_path: start_path.clone(),
@@ -114,11 +149,20 @@ impl Application for FileExplorer {
                 system_locations: vec![],
                 file_name_input: String::new(),
                 confirm_delete: None,
-                clipboard: None, // Initialisation du presse-papiers
+                clipboard: None,
+                show_hidden: false,
+                search_input: String::new(),
+                search_results: Vec::new(),
+                search_cache: HashMap::new(),
+                file_index: HashMap::new(),
+                last_index_update: None,
             },
             Command::batch(vec![
-                Command::perform(load_files(start_path.clone()), Message::FilesLoaded),
-                Command::perform(load_directory_structure(start_path), Message::DirectoryStructureLoaded),
+                Command::perform(load_files(start_path.clone(), false), Message::FilesLoaded),
+                Command::perform(
+                    load_directory_structure(start_path, false),
+                    Message::DirectoryStructureLoaded,
+                ),
                 Command::perform(load_system_locations(), Message::SystemLocationsLoaded),
             ]),
         )
@@ -135,8 +179,17 @@ impl Application for FileExplorer {
                 self.path_input = path.to_string_lossy().to_string();
                 self.selected_file = None;
                 self.file_preview = None;
-                
-                Command::perform(load_files(path), Message::FilesLoaded)
+
+                Command::batch(vec![
+                    Command::perform(
+                        load_files(path.clone(), self.show_hidden),
+                        Message::FilesLoaded,
+                    ),
+                    Command::perform(
+                        load_directory_structure(path, self.show_hidden),
+                        Message::DirectoryStructureLoaded,
+                    ),
+                ])
             }
             Message::FilesLoaded(files) => {
                 self.files = files;
@@ -160,25 +213,29 @@ impl Application for FileExplorer {
                     self.current_path = path.clone();
                     self.selected_file = None;
                     self.file_preview = None;
-                    
-                    Command::perform(load_files(path), Message::FilesLoaded)
+
+                    Command::perform(load_files(path, self.show_hidden), Message::FilesLoaded)
                 } else {
                     Command::none()
                 }
             }
             Message::FileSelected(path) => {
                 self.selected_file = Some(path.clone());
-                
+
                 Command::perform(load_file_preview(path), Message::FilePreviewLoaded)
             }
             Message::ToggleDirectory(index) => {
                 if index < self.directory_structure.len() {
                     // Toggle the expanded state
-                    self.directory_structure[index].expanded = !self.directory_structure[index].expanded;
-                    
+                    self.directory_structure[index].expanded =
+                        !self.directory_structure[index].expanded;
+
                     // If we're expanding, we might need to reload the directory structure
                     let root_path = self.directory_structure[0].path.clone();
-                    Command::perform(load_directory_structure(root_path), Message::DirectoryStructureLoaded)
+                    Command::perform(
+                        load_directory_structure(root_path, self.show_hidden),
+                        Message::DirectoryStructureLoaded,
+                    )
                 } else {
                     Command::none()
                 }
@@ -196,7 +253,7 @@ impl Application for FileExplorer {
                         .spawn()
                         .ok();
                 }
-                
+
                 #[cfg(target_os = "macos")]
                 {
                     std::process::Command::new("open")
@@ -204,7 +261,7 @@ impl Application for FileExplorer {
                         .spawn()
                         .ok();
                 }
-                
+
                 #[cfg(target_os = "linux")]
                 {
                     std::process::Command::new("xdg-open")
@@ -212,10 +269,9 @@ impl Application for FileExplorer {
                         .spawn()
                         .ok();
                 }
-                
+
                 Command::none()
             }
-            //Input of file or directory
             Message::FileNameInputChanged(new_name) => {
                 self.file_name_input = new_name;
                 Command::none()
@@ -223,43 +279,54 @@ impl Application for FileExplorer {
             Message::CreateFile => {
                 let path = self.current_path.join(&self.file_name_input);
                 std::fs::write(&path, "").ok();
-                self.file_name_input.clear(); // Vider le champ après création
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
+                self.file_name_input.clear();
+                Command::perform(
+                    load_files(self.current_path.clone(), self.show_hidden),
+                    Message::FilesLoaded,
+                )
             }
-            
+
             Message::CreateDirectory => {
                 let path = self.current_path.join(&self.file_name_input);
                 std::fs::create_dir_all(&path).ok();
-                self.file_name_input.clear(); // Vider le champ après création
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
+                self.file_name_input.clear();
+                Command::perform(
+                    load_files(self.current_path.clone(), self.show_hidden),
+                    Message::FilesLoaded,
+                )
             }
             Message::DeleteFile(path) => {
                 let _ = std::fs::remove_file(&path);
                 self.selected_file = None;
                 self.file_preview = None;
-            
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
+
+                Command::perform(
+                    load_files(self.current_path.clone(), self.show_hidden),
+                    Message::FilesLoaded,
+                )
             }
             Message::ConfirmDeleteFile(path) => {
                 self.confirm_delete = Some(path);
                 Command::none()
             }
-            
+
             Message::CancelDelete => {
                 self.confirm_delete = None;
                 Command::none()
             }
-            
+
             Message::DeleteConfirmed(path) => {
                 let _ = std::fs::remove_file(&path);
                 self.confirm_delete = None;
                 self.selected_file = None;
                 self.file_preview = None;
-            
-                Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded)
+
+                Command::perform(
+                    load_files(self.current_path.clone(), self.show_hidden),
+                    Message::FilesLoaded,
+                )
             }
-            
-            // Nouveaux gestionnaires de messages pour copier/couper/coller
+
             Message::CopyFile(path) => {
                 self.clipboard = Some(ClipboardItem {
                     path,
@@ -267,7 +334,7 @@ impl Application for FileExplorer {
                 });
                 Command::none()
             }
-            
+
             Message::CutFile(path) => {
                 self.clipboard = Some(ClipboardItem {
                     path,
@@ -275,72 +342,188 @@ impl Application for FileExplorer {
                 });
                 Command::none()
             }
-            
+
             Message::PasteFile => {
                 if let Some(clipboard_item) = &self.clipboard {
                     let source_path = &clipboard_item.path;
                     let file_name = source_path.file_name().unwrap_or_default();
                     let dest_path = self.current_path.join(file_name);
-                    
+
                     match clipboard_item.operation {
                         ClipboardOperation::Copy => {
-                            // Copier le fichier
                             if source_path.is_file() {
                                 let _ = std::fs::copy(source_path, &dest_path);
                             } else if source_path.is_dir() {
-                                // Pour les dossiers, on utiliserait une fonction récursive
                                 let _ = copy_dir_recursive(source_path, &dest_path);
                             }
                         }
                         ClipboardOperation::Cut => {
-                            // Déplacer le fichier
                             let _ = std::fs::rename(source_path, &dest_path);
-                            // Vider le presse-papiers après un déplacement
                             self.clipboard = None;
                         }
                     }
-                    
-                    return Command::perform(load_files(self.current_path.clone()), Message::FilesLoaded);
+
+                    return Command::perform(
+                        load_files(self.current_path.clone(), self.show_hidden),
+                        Message::FilesLoaded,
+                    );
                 }
+                Command::none()
+            }
+            Message::ToggleHiddenFiles => {
+                self.show_hidden = !self.show_hidden;
+                Command::batch(vec![
+                    Command::perform(
+                        load_files(self.current_path.clone(), self.show_hidden),
+                        Message::FilesLoaded,
+                    ),
+                    Command::perform(
+                        load_directory_structure(self.current_path.clone(), self.show_hidden),
+                        Message::DirectoryStructureLoaded,
+                    ),
+                ])
+            }
+            Message::SearchInputChanged(input) => {
+                self.search_input = input;
+                if !self.search_input.is_empty() {
+                    let search_terms: Vec<String> = self.search_input
+                        .to_lowercase()
+                        .split_whitespace()
+                        .map(String::from)
+                        .collect();
+                    
+                    self.search_results = self.search_files(&search_terms);
+                } else {
+                    self.search_results.clear();
+                }
+                Command::none()
+            }
+            Message::ClearSearch => {
+                self.search_input.clear();
+                self.search_results.clear();
                 Command::none()
             }
         }
     }
 
-    fn view(&self) -> Element<Self::Message> {
-        // Navigation bar at the top
+    fn view(&self) -> Element<Message> {
         let navigation_bar = row![
             text_input("Enter path...", &self.path_input)
                 .on_input(Message::PathInputChanged)
-                .on_submit(Message::NavigateToPath),
+                .on_submit(Message::NavigateToPath)
+                .width(Length::FillPortion(2)),
             button(text("Go"))
                 .on_press(Message::NavigateToPath)
-                .padding(5)
+                .padding(2),
+            button(text(if self.show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" }))
+                .on_press(Message::ToggleHiddenFiles)
+                .padding(2),
+            text_input("Rechercher des fichiers...", &self.search_input)
+                .on_input(Message::SearchInputChanged)
+                .width(Length::FillPortion(2)),
+            button("Effacer")
+                .on_press(Message::ClearSearch)
+                .padding(2),
         ]
-        .spacing(10)
-        .padding(10);
+        .spacing(5)
+        .padding(5);
         
-        // Directory tree on the left
-        let directory_tree = self.view_directory_structure();
+        let content: Element<Message> = if !self.search_results.is_empty() {
+            let mut results_list = vec![];
+            
+            for result in &self.search_results {
+                let path = result.path.clone();
+                let score = result.score;
+                let name = path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                
+                let parent = path.parent()
+                    .and_then(|p| p.strip_prefix(&self.current_path).ok())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                let file_type = get_file_type(&path);
+                let icon_path = match file_type {
+                    FileType::Directory => "icons/folder.png",
+                    FileType::Code => "icons/code.png",
+                    FileType::PDF => "icons/pdf.png",
+                    FileType::Audio => "icons/audio.png",
+                    FileType::Image => "icons/image.png",
+                    FileType::Video => "icons/video.png",
+                    FileType::Text => "icons/file_generic.png",
+                    FileType::Word => "icons/word.png",
+                    FileType::Excel => "icons/excel.png",
+                    FileType::PowerPoint => "icons/pptx.png",
+                    FileType::Other => "icons/file_generic.png",
+                };
+
+                let message = if file_type == FileType::Directory {
+                    Message::ChangeDirectory(path.clone())
+                } else {
+                    Message::FileSelected(path.clone())
+                };
+                
+                results_list.push(
+                    button(
+                        row![
+                            image(image::Handle::from_path(icon_path))
+                                .width(Length::Fixed(20.0))
+                                .height(Length::Fixed(20.0)),
+                            column![
+                                row![
+                                    text(name)
+                                        .width(Length::Fill)
+                                        .style(iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.0, 0.0))),
+                                    text(format!(" ({:.0}%)", score * 100.0))
+                                        .size(12)
+                                        .style(iced::theme::Text::Color(iced::Color::from_rgb(0.5, 0.5, 0.5)))
+                                ],
+                                if !parent.is_empty() {
+                                    text(format!("📁 {}", parent))
+                                        .size(12)
+                                        .style(iced::theme::Text::Color(iced::Color::from_rgb(0.5, 0.5, 0.5)))
+                                } else {
+                                    text("")
+                                }
+                            ]
+                            .spacing(2)
+                        ]
+                        .spacing(10)
+                        .padding(5)
+                    )
+                    .on_press(message)
+                    .style(iced::theme::Button::Secondary)
+                    .width(Length::Fill)
+                    .into()
+                );
+            }
+            
+            scrollable(
+                container(
+                    column(results_list)
+                        .spacing(5)
+                )
+                .padding(10)
+            )
+            .height(Length::Fill)
+            .into()
+        } else {
+            row![
+                container(self.view_directory_structure()).width(Length::FillPortion(1)),
+                container(self.view_file_list()).width(Length::FillPortion(2)),
+                container(self.view_file_details()).width(Length::FillPortion(1))
+            ]
+            .spacing(10)
+            .into()
+        };
         
-        // File list in the center
-        let file_list = self.view_file_list();
-        
-        // File preview/details on the right
-        let file_details = self.view_file_details();
-        
-        // Main layout
-        let content = row![
-            container(directory_tree).width(Length::FillPortion(1)),
-            container(file_list).width(Length::FillPortion(2)),
-            container(file_details).width(Length::FillPortion(1))
-        ]
-        .spacing(10);
-        
-        // Combining navigation and content
         column![
             navigation_bar,
-            content.height(Length::Fill)
+            container(content)
+                .height(Length::Fill)
+                .width(Length::Fill)
         ]
         .into()
     }
@@ -348,7 +531,6 @@ impl Application for FileExplorer {
 
 impl FileExplorer {
     fn view_directory_structure(&self) -> Element<Message> {
-        
         let tree_title = text("Quick Access")
             .size(16)
             .horizontal_alignment(Horizontal::Center);
@@ -359,7 +541,6 @@ impl FileExplorer {
             .on_submit(Message::CreateFile)
             .padding(10);
 
-        //Button to create a file
         let create_buttons = row![
             button("Create File").on_press(Message::CreateFile),
             button("Create Directory").on_press(Message::CreateDirectory)
@@ -370,16 +551,15 @@ impl FileExplorer {
             container(file_name_input)
                 .padding(5)
                 .width(Length::Fill)
-                .into()
+                .into(),
         );
         dir_list.push(
             container(create_buttons)
                 .padding(5)
                 .width(Length::Fill)
-                .into()
+                .into(),
         );
 
-        // Section copier/couper/coller
         if let Some(selected_path) = &self.selected_file {
             let clipboard_buttons = column![
                 row![
@@ -392,8 +572,7 @@ impl FileExplorer {
                         .on_press(Message::PasteFile)
                         .style(iced::theme::Button::Positive)
                 } else {
-                    button("")
-                        .style(iced::theme::Button::Secondary)
+                    button("").style(iced::theme::Button::Secondary)
                 }
             ]
             .spacing(5);
@@ -402,10 +581,9 @@ impl FileExplorer {
                 container(clipboard_buttons)
                     .padding(5)
                     .width(Length::Fill)
-                    .into()
+                    .into(),
             );
         } else if self.clipboard.is_some() {
-            // Afficher seulement le bouton coller si quelque chose est dans le presse-papiers
             let paste_button = button("Paste")
                 .on_press(Message::PasteFile)
                 .style(iced::theme::Button::Positive);
@@ -414,118 +592,95 @@ impl FileExplorer {
                 container(paste_button)
                     .padding(5)
                     .width(Length::Fill)
-                    .into()
+                    .into(),
             );
         }
 
-        // Afficher les informations du presse-papiers
         if let Some(clipboard_item) = &self.clipboard {
             let operation_text = match clipboard_item.operation {
                 ClipboardOperation::Copy => "Copied:",
                 ClipboardOperation::Cut => "Cut:",
             };
-            let file_name = clipboard_item.path.file_name()
+            let file_name = clipboard_item
+                .path
+                .file_name()
                 .unwrap_or_default()
                 .to_string_lossy();
-            
+
             dir_list.push(
                 container(
-                    column![
-                        text(operation_text).size(12),
-                        text(file_name).size(10)
-                    ]
-                    .spacing(2)
+                    column![text(operation_text).size(12), text(file_name).size(10)].spacing(2),
                 )
                 .padding(5)
                 .width(Length::Fill)
-                .into()
+                .into(),
             );
         }
 
-        // First, show system locations (disks and important user folders)
         for location in &self.system_locations {
             let icon = match location.location_type {
                 SystemLocationType::Disk => "💾 ",
                 SystemLocationType::UserFolder => "📁 ",
             };
-            
-            let content = row![
-                text(format!("{}{}", icon, location.name))
-            ]
-            .spacing(5);
-            
-            // Use a darker blue for folders (default style)
+
+            let content = row![text(format!("{}{}", icon, location.name))].spacing(5);
+
             let btn = button(content)
                 .on_press(Message::ChangeDirectory(location.path.clone()))
                 .width(Length::Fill);
-            
-            dir_list.push(
-                container(btn)
-                    .padding(5)
-                    .width(Length::Fill)
-                    .into()
-            );
+
+            dir_list.push(container(btn).padding(5).width(Length::Fill).into());
         }
-        
-        // Add a separator between quick access and directory structure
+
         dir_list.push(
             container(
                 text("Current Directory")
                     .size(16)
-                    .horizontal_alignment(Horizontal::Center)
+                    .horizontal_alignment(Horizontal::Center),
             )
             .padding([20, 0, 5, 0])
-            .into()
+            .into(),
         );
-        
-        // Display the directory structure as an indented list
+
         for (index, dir) in self.directory_structure.iter().enumerate() {
-            // Only show directories that should be visible
-            let should_show = true; // Logic can be added here to hide children of collapsed dirs
-            
+            let should_show = true;
+
             if should_show {
-                // Create indentation based on depth
-                let indent = dir.depth * 20; // 20 pixels per level
-                
-                // Create expand/collapse button if it's a directory
+                let indent = dir.depth * 20;
+
                 let toggle_icon = if dir.expanded { "▼ " } else { "▶ " };
-                
+
                 let content = row![
-                    container(text(toggle_icon))
-                        .width(Length::Fixed(20.0)),
+                    container(text(toggle_icon)).width(Length::Fixed(20.0)),
                     text(format!("📁 {}", dir.name))
                 ]
                 .spacing(5);
-                
+
                 let btn = button(content)
                     .on_press(Message::ChangeDirectory(dir.path.clone()))
                     .width(Length::Fill);
-                
+
                 dir_list.push(
                     container(btn)
                         .padding(5)
                         .width(Length::Fill)
                         .padding([0, 0, 0, indent as u16])
-                        .into()
+                        .into(),
                 );
             }
         }
-        
+
         scrollable(
-            container(
-                column(dir_list)
-                    .spacing(2)
-            )
-            .padding(10)
-            .height(Length::Fill)
+            container(column(dir_list).spacing(2))
+                .padding(10)
+                .height(Length::Fill),
         )
         .into()
     }
-    
+
     fn view_file_list(&self) -> Element<Message> {
         let mut file_list = vec![];
-        
-        // Title
+
         file_list.push(
             row![
                 text("Name").width(Length::FillPortion(3)),
@@ -534,133 +689,146 @@ impl FileExplorer {
             ]
             .spacing(10)
             .padding(5)
-            .into()
+            .into(),
         );
-        
-        // Parent directory button
+
         if let Some(parent) = self.current_path.parent() {
             file_list.push(
                 button(
                     row![
-                        text("📁 .. (Parent Directory)").width(Length::FillPortion(3)),
+                        image(image::Handle::from_path("icons/folder.png"))
+                            .width(Length::Fixed(20.0))
+                            .height(Length::Fixed(20.0)),
+                        text(".. (Parent Directory)").width(Length::FillPortion(3)),
                         text("").width(Length::FillPortion(1)),
                         text("").width(Length::FillPortion(2))
                     ]
-                    .spacing(10)
+                    .spacing(10),
                 )
                 .on_press(Message::ChangeDirectory(parent.to_path_buf()))
                 .width(Length::Fill)
                 .into(),
             );
         }
-        
-        // Files and directories
+
         for entry in &self.files {
-            let file_name = entry.path.file_name()
+            let file_name = entry
+                .path
+                .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("Unknown"))
                 .to_string_lossy()
                 .to_string();
-            
+
             let size_text = format_size(entry.size);
-            
-            let modified_text = entry.modified
+
+            let modified_text = entry
+                .modified
                 .map(|time| format_time(time))
                 .unwrap_or_else(|| String::from("-"));
-            
-            let is_selected = self.selected_file.as_ref().map_or(false, |p| p == &entry.path);
-            
-            if entry.path.is_dir() {
-                // Les dossiers gardent les boutons bleus
-                let row_content = row![
-                    text(format!("📁 {}", file_name))
-                        .width(Length::FillPortion(3)),
-                    text(size_text).width(Length::FillPortion(1)),
-                    text(modified_text).width(Length::FillPortion(2))
-                ]
-                .spacing(10);
-                
-                let btn = button(row_content)
+
+            let is_selected = self
+                .selected_file
+                .as_ref()
+                .map_or(false, |p| p == &entry.path);
+
+            let icon_path = match entry.file_type {
+                FileType::Directory => "icons/folder.png",
+                FileType::Code => "icons/code.png",
+                FileType::PDF => "icons/pdf.png",
+                FileType::Audio => "icons/audio.png",
+                FileType::Image => "icons/image.png",
+                FileType::Video => "icons/video.png",
+                FileType::Text => "icons/file_generic.png",
+                FileType::Word => "icons/word.png",
+                FileType::Excel => "icons/excel.png",
+                FileType::PowerPoint => "icons/pptx.png",
+                FileType::Other => "icons/file_generic.png",
+            };
+
+            let row_content = row![
+                image(image::Handle::from_path(icon_path))
+                    .width(Length::Fixed(20.0))
+                    .height(Length::Fixed(20.0)),
+                text(file_name)
+                    .width(Length::FillPortion(3))
+                    .style(if is_selected {
+                        iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0))
+                    } else {
+                        iced::theme::Text::Default
+                    }),
+                text(size_text)
+                    .width(Length::FillPortion(1))
+                    .style(if is_selected {
+                        iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0))
+                    } else {
+                        iced::theme::Text::Default
+                    }),
+                text(modified_text)
+                    .width(Length::FillPortion(2))
+                    .style(if is_selected {
+                        iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0))
+                    } else {
+                        iced::theme::Text::Default
+                    })
+            ]
+            .spacing(10);
+
+            let btn = if entry.file_type == FileType::Directory {
+                button(row_content)
                     .on_press(Message::ChangeDirectory(entry.path.clone()))
-                    .width(Length::Fill);
-                
-                file_list.push(btn.into());
+                    .width(Length::Fill)
             } else {
-                // Les fichiers sont affichés comme du texte simple, cliquable
-                let text_style = if is_selected {
-                    iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0)) // Vert pour la sélection
-                } else {
-                    iced::theme::Text::Default
-                };
-                
-                let row_content = button(
-                    row![
-                        text(format!("📄 {}", file_name))
-                            .width(Length::FillPortion(3))
-                            .style(text_style),
-                        text(size_text)
-                            .width(Length::FillPortion(1))
-                            .style(text_style),
-                        text(modified_text)
-                            .width(Length::FillPortion(2))
-                            .style(text_style)
-                    ]
-                    .spacing(10)
-                )
-                .on_press(Message::FileSelected(entry.path.clone()))
-                .style(iced::theme::Button::Text) // Style de bouton transparent
-                .width(Length::Fill);
-                
-                file_list.push(row_content.into());
-            }
+                button(row_content)
+                    .on_press(Message::FileSelected(entry.path.clone()))
+                    .style(iced::theme::Button::Text)
+                    .width(Length::Fill)
+            };
+
+            file_list.push(btn.into());
         }
-        
+
         scrollable(
-            container(
-                column(file_list)
-                    .spacing(5)
-            )
-            .padding(10)
-            .height(Length::Fill)
+            container(column(file_list).spacing(5))
+                .padding(10)
+                .height(Length::Fill),
         )
         .into()
     }
-    
+
     fn view_file_details(&self) -> Element<Message> {
         let mut details = vec![];
-        
+
         details.push(
             text("File Details")
                 .size(16)
                 .horizontal_alignment(Horizontal::Center)
-                .into()
+                .into(),
         );
-        
+
         if let Some(selected_path) = &self.selected_file {
-            let file_name = selected_path.file_name()
+            let file_name = selected_path
+                .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("Unknown"))
                 .to_string_lossy();
-            
-            let extension = selected_path.extension()
+
+            let extension = selected_path
+                .extension()
                 .unwrap_or_else(|| std::ffi::OsStr::new(""))
                 .to_string_lossy()
                 .to_string();
-            
-            // Basic details
+
             details.push(text(format!("Name: {}", file_name)).into());
             details.push(text(format!("Type: {}", extension.to_uppercase())).into());
-            
-            // Size
+
             if let Ok(metadata) = fs::metadata(selected_path) {
                 details.push(text(format!("Size: {}", format_size(metadata.len()))).into());
-                
-                // Modified time
+
                 if let Ok(time) = metadata.modified() {
                     details.push(text(format!("Modified: {}", format_time(time))).into());
                 }
             }
-            
+
             if let Some(path) = &self.confirm_delete {
-                
                 details.push(
                     container(
                         column![
@@ -675,46 +843,41 @@ impl FileExplorer {
                             .spacing(10)
                         ]
                         .spacing(10)
-                        .padding(10)
+                        .padding(10),
                     )
                     .style(iced::theme::Container::Box)
                     .width(Length::Fill)
-                    .into()
+                    .into(),
                 );
-            } 
-            else if let Some(selected_path) = &self.selected_file {
+            } else if let Some(selected_path) = &self.selected_file {
                 details.push(
                     button(text("Open File"))
                         .on_press(Message::OpenFile(selected_path.clone()))
                         .padding(5)
-                        .into()
+                        .into(),
                 );
-            
+
                 details.push(
                     button(text("Delete file"))
                         .on_press(Message::ConfirmDeleteFile(selected_path.clone()))
                         .padding(5)
                         .style(iced::theme::Button::Destructive)
-                        .into()
+                        .into(),
                 );
             }
-            
-            // Preview section
+
             details.push(text("Preview:").size(16).into());
-            
+
             if let Some(preview) = &self.file_preview {
                 match preview {
                     FilePreview::Image(handle) => {
                         details.push(
-                            container(
-                                image(handle.clone())
-                                    .width(Length::Fill)
-                            )
-                            .height(Length::Fixed(200.0))
-                            .width(Length::Fill)
-                            .center_x()
-                            .center_y()
-                            .into()
+                            container(image(handle.clone()).width(Length::Fill))
+                                .height(Length::Fixed(200.0))
+                                .width(Length::Fill)
+                                .center_x()
+                                .center_y()
+                                .into(),
                         );
                     }
                     FilePreview::Text(content) => {
@@ -723,14 +886,11 @@ impl FileExplorer {
                         } else {
                             content.clone()
                         };
-                        
+
                         details.push(
-                            scrollable(
-                                text(preview_text)
-                                    .width(Length::Fill)
-                            )
-                            .height(Length::Fixed(200.0))
-                            .into()
+                            scrollable(text(preview_text).width(Length::Fill))
+                                .height(Length::Fixed(200.0))
+                                .into(),
                         );
                     }
                     FilePreview::Pdf(info) => {
@@ -744,56 +904,408 @@ impl FileExplorer {
         } else {
             details.push(text("No file selected").into());
         }
-        
-        
-        
+
         scrollable(
-            container(
-                column(details)
-                    .spacing(10)
-            )
-            .padding(10)
-            .height(Length::Fill)
+            container(column(details).spacing(10))
+                .padding(10)
+                .height(Length::Fill),
         )
         .into()
     }
+
+    fn update_file_index(&mut self) {
+        let now = Instant::now();
+        if let Some(last_update) = self.last_index_update {
+            if now.duration_since(last_update) < Duration::from_secs(300) { // 5 minutes
+                return;
+            }
+        }
+
+        self.file_index.clear();
+
+        // Liste des dossiers et fichiers à ignorer
+        let ignored_patterns = [
+            // Dossiers de développement
+            "/.git/",
+            "/node_modules/",
+            "/target/",
+            "/build/",
+            "/dist/",
+            "/.idea/",
+            "/.vscode/",
+            
+            // Dossiers d'applications et GitHub
+            "github",
+            "GitHub",
+            "GITHUB",
+            "github.app",
+            "GitHub.app",
+            "GITHUB.APP",
+            "github-desktop",
+            "GitHub Desktop",
+            "GITHUB DESKTOP",
+            "github-desktop.app",
+            "GitHub Desktop.app",
+            "GITHUB DESKTOP.APP",
+            ".app/",
+            ".exe/",
+            ".dmg/",
+            ".pkg/",
+            "SublimeText.app/",
+            "Visual Studio Code.app/",
+            "Xcode.app/",
+            "Chrome.app/",
+            "Firefox.app/",
+            "Safari.app/",
+            "Microsoft Office/",
+            "Adobe/",
+            "JetBrains/",
+            "IntelliJ/",
+            "WebStorm/",
+            "PhpStorm/",
+            "PyCharm/",
+            "Android Studio/",
+            "Eclipse/",
+            "NetBeans/",
+            "Atom.app/",
+            "iTerm.app/",
+            "Terminal.app/",
+            "Spotify.app/",
+            "Discord.app/",
+            "Slack.app/",
+            "Zoom.app/",
+            "Teams.app/",
+            "Microsoft Teams.app/",
+            "Dropbox.app/",
+            "OneDrive.app/",
+            "Google Drive.app/",
+            "Docker.app/",
+            "Postman.app/",
+            "MAMP.app/",
+            "XAMPP.app/",
+            "MySQL.app/",
+            "PostgreSQL.app/",
+            "MongoDB.app/",
+            "Redis.app/",
+            "Node.js.app/",
+            "Python.app/",
+            "Java.app/",
+            "Ruby.app/",
+            "Go.app/",
+            "Rust.app/",
+            "C++.app/",
+            "Visual Studio.app/",
+            "Unity.app/",
+            "Unreal Engine.app/",
+            "Blender.app/",
+            "Photoshop.app/",
+            "Illustrator.app/",
+            "InDesign.app/",
+            "Premiere Pro.app/",
+            "After Effects.app/",
+            "Lightroom.app/",
+            "Final Cut Pro.app/",
+            "Logic Pro.app/",
+            "GarageBand.app/",
+            "iTunes.app/",
+            "Music.app/",
+            "TV.app/",
+            "Books.app/",
+            "News.app/",
+            "Stocks.app/",
+            "Weather.app/",
+            "Maps.app/",
+            "Notes.app/",
+            "Reminders.app/",
+            "Calendar.app/",
+            "Contacts.app/",
+            "Mail.app/",
+            "Messages.app/",
+            "FaceTime.app/",
+            "Photos.app/",
+            "Preview.app/",
+            "QuickTime Player.app/",
+            "Siri.app/",
+            "System Preferences.app/",
+            "Terminal.app/",
+            "Activity Monitor.app/",
+            "Console.app/",
+            "Disk Utility.app/",
+            "Time Machine.app/",
+            "Migration Assistant.app/",
+            "Boot Camp Assistant.app/",
+            "Automator.app/",
+            "Script Editor.app/",
+            "Voice Memos.app/",
+            "Home.app/",
+            "Shortcuts.app/",
+            "Stocks.app/",
+            "Voice Memos.app/",
+            "Calculator.app/",
+            "Dictionary.app/",
+            "Font Book.app/",
+            "Image Capture.app/",
+            "Keychain Access.app/",
+            "Migration Assistant.app/",
+            "System Information.app/",
+            "Terminal.app/",
+            "Time Machine.app/",
+            "Voice Memos.app/",
+            
+            // Fichiers système et temporaires
+            "/.DS_Store",
+            "/Thumbs.db",
+            "*.tmp",
+            "*.log",
+            "*.cache",
+            "*.swp",
+            "*.bak",
+            "*.temp",
+        ];
+
+        let walker = WalkDir::new(&self.current_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|entry| {
+                let path = entry.path().to_string_lossy().to_lowercase();
+                let file_name = entry.file_name().to_string_lossy().to_lowercase();
+                
+                // Vérifier si le chemin ou le nom de fichier contient des patterns à ignorer
+                let should_ignore = ignored_patterns.iter().any(|pattern| {
+                    path.contains(&pattern.to_lowercase()) || 
+                    file_name.contains(&pattern.to_lowercase())
+                });
+
+                // Vérifier les extensions d'applications
+                let is_app_extension = file_name.ends_with(".app") || 
+                                     file_name.ends_with(".exe") || 
+                                     file_name.ends_with(".dmg") || 
+                                     file_name.ends_with(".pkg");
+
+                // Vérifier si c'est un dossier d'application
+                let is_app_folder = path.contains("/applications/") || 
+                                  path.contains("/program files/") || 
+                                  path.contains("/program files (x86)/") ||
+                                  path.contains("/library/application support/");
+
+                !should_ignore && !is_app_extension && !is_app_folder
+            });
+
+        for entry in walker.filter_map(Result::ok) {
+            let path = entry.path();
+            let file_name = path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+
+            // Ignorer les fichiers cachés si show_hidden est false
+            if !self.show_hidden && file_name.starts_with('.') {
+                continue;
+            }
+
+            // Ignorer les fichiers d'applications
+            if file_name.ends_with(".app") || 
+               file_name.ends_with(".exe") || 
+               file_name.ends_with(".dmg") || 
+               file_name.ends_with(".pkg") {
+                continue;
+            }
+
+            // Ignorer les dossiers d'applications
+            let path_str = path.to_string_lossy().to_lowercase();
+            if path_str.contains("/applications/") || 
+               path_str.contains("/program files/") || 
+               path_str.contains("/program files (x86)/") ||
+               path_str.contains("/library/application support/") {
+                continue;
+            }
+
+            // Indexer le nom complet du fichier
+            self.file_index
+                .entry(file_name.clone())
+                .or_insert_with(Vec::new)
+                .push(path.to_path_buf());
+
+            // Indexer chaque mot du nom de fichier
+            for word in file_name.split(|c: char| !c.is_alphanumeric()) {
+                if !word.is_empty() && word.len() > 1 { // Ignorer les mots trop courts
+                    self.file_index
+                        .entry(word.to_string())
+                        .or_insert_with(Vec::new)
+                        .push(path.to_path_buf());
+                }
+            }
+        }
+
+        self.last_index_update = Some(now);
+    }
+
+    fn search_files(&mut self, search_terms: &[String]) -> Vec<SearchResult> {
+        let cache_key = format!("{}_{}", self.current_path.to_string_lossy(), search_terms.join(" "));
+        if let Some((cached_results, timestamp)) = self.search_cache.get(&cache_key) {
+            if Instant::now().duration_since(*timestamp) < Duration::from_secs(60) {
+                return cached_results.clone();
+            }
+        }
+
+        self.update_file_index();
+
+        let mut results = Vec::new();
+        let mut seen_paths = HashSet::new();
+        let mut path_scores = HashMap::new();
+
+        // Prioriser les dossiers importants
+        let important_folders = [
+            "Documents",
+            "Downloads",
+            "Desktop",
+            "Pictures",
+            "Music",
+            "Videos",
+            "Projects",
+            "Work",
+            "Personal",
+        ];
+
+        for term in search_terms {
+            for (indexed_term, paths) in &self.file_index {
+                let distance = levenshtein(term, indexed_term) as f64;
+                let max_len = term.len().max(indexed_term.len()) as f64;
+                let mut score = 1.0 - (distance / max_len);
+
+                // Bonus pour les correspondances exactes
+                if indexed_term == term {
+                    score *= 1.5;
+                }
+
+                // Bonus pour les dossiers importants
+                if let Some(file_name) = paths[0].file_name() {
+                    let name = file_name.to_string_lossy().to_lowercase();
+                    if important_folders.iter().any(|&folder| name.contains(folder)) {
+                        score *= 1.3;
+                    }
+                }
+
+                if score >= 0.3 {
+                    for path in paths {
+                        if seen_paths.insert(path.clone()) {
+                            let file_name = path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_lowercase();
+
+                            let mut total_score = 0.0;
+                            let mut best_score: f64 = 0.0;
+                            let mut match_count = 0;
+
+                            for search_term in search_terms {
+                                let term_distance = levenshtein(search_term, &file_name) as f64;
+                                let term_max_len = search_term.len().max(file_name.len()) as f64;
+                                let mut term_score = 1.0 - (term_distance / term_max_len);
+
+                                // Bonus pour les correspondances au début du nom
+                                if file_name.starts_with(search_term) {
+                                    term_score *= 1.2;
+                                }
+
+                                // Bonus pour les correspondances dans les dossiers importants
+                                if let Some(parent) = path.parent() {
+                                    let parent_name = parent.file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_lowercase();
+                                    if important_folders.iter().any(|&folder| parent_name.contains(folder)) {
+                                        term_score *= 1.1;
+                                    }
+                                }
+
+                                if file_name.contains(search_term) {
+                                    total_score += term_score;
+                                    match_count += 1;
+                                }
+                                best_score = best_score.max(term_score);
+                            }
+
+                            let final_score = if match_count > 0 {
+                                (total_score / match_count as f64) * 0.7 + (best_score * 0.3)
+                            } else {
+                                best_score
+                            };
+
+                            let final_score = final_score.min(1.0).max(0.0);
+                            
+                            if final_score >= 0.3 {
+                                path_scores.insert(path.clone(), final_score);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (path, score) in path_scores {
+            results.push(SearchResult {
+                path,
+                score,
+            });
+        }
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(100);
+
+        self.search_cache.insert(cache_key, (results.clone(), Instant::now()));
+
+        results
+    }
 }
 
-// Fonction pour copier récursivement un dossier
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     if !dst.exists() {
         fs::create_dir_all(dst)?;
     }
-    
+
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        
+
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             fs::copy(&src_path, &dst_path)?;
         }
     }
-    
+
     Ok(())
 }
 
-// Helper functions
-async fn load_files(path: PathBuf) -> Vec<FileEntry> {
+async fn load_files(path: PathBuf, show_hidden: bool) -> Vec<FileEntry> {
     fs::read_dir(&path)
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
+                .filter(|entry| {
+                    let path = entry.path();
+                    let file_name = path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                        .to_string_lossy();
+
+                    if !show_hidden {
+                        !file_name.starts_with('.')
+                    } else {
+                        true
+                    }
+                })
                 .map(|entry| {
                     let path = entry.path();
                     let metadata = fs::metadata(&path).ok();
-                    
+
                     FileEntry {
-                        path,
+                        path: path.clone(),
                         size: metadata.as_ref().map_or(0, |m| m.len()),
                         modified: metadata.and_then(|m| m.modified().ok()),
+                        file_type: get_file_type(&path),
                     }
                 })
                 .collect()
@@ -801,39 +1313,36 @@ async fn load_files(path: PathBuf) -> Vec<FileEntry> {
         .unwrap_or_else(|_| vec![])
 }
 
-async fn load_directory_structure(root: PathBuf) -> Vec<DirectoryEntry> {
+async fn load_directory_structure(root: PathBuf, show_hidden: bool) -> Vec<DirectoryEntry> {
     let mut dirs = Vec::new();
-    
-    // Add the root directory
-    let root_name = root.file_name()
+
+    let root_name = root
+        .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("Root"))
         .to_string_lossy()
         .to_string();
-    
+
     dirs.push(DirectoryEntry {
         path: root.clone(),
         name: root_name,
         depth: 0,
         expanded: true,
     });
-    
-    // Load all subdirectories up to a certain depth
-    scan_directory(&root, &mut dirs, 0, 3); // Max depth of 3
-    
+
+    scan_directory(&root, &mut dirs, 0, 3, show_hidden);
+
     dirs
 }
 
 async fn load_system_locations() -> Vec<SystemLocation> {
     let mut locations = Vec::new();
-    
-    // Add system drives (different for each OS)
+
     #[cfg(target_os = "windows")]
     {
-        // Windows drives
         for drive_letter in b'C'..=b'Z' {
             let drive = format!("{}:\\", drive_letter as char);
             let path = PathBuf::from(&drive);
-            
+
             if path.exists() {
                 locations.push(SystemLocation {
                     name: format!("{} Drive", drive_letter as char),
@@ -843,19 +1352,19 @@ async fn load_system_locations() -> Vec<SystemLocation> {
             }
         }
     }
-    
+
     #[cfg(target_os = "macos")]
     {
-        // macOS volumes
         if let Ok(entries) = fs::read_dir("/Volumes") {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name()
+                    let name = path
+                        .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("Unknown"))
                         .to_string_lossy()
                         .to_string();
-                    
+
                     locations.push(SystemLocation {
                         name,
                         path,
@@ -865,19 +1374,19 @@ async fn load_system_locations() -> Vec<SystemLocation> {
             }
         }
     }
-    
+
     #[cfg(target_os = "linux")]
     {
-        // Linux mounts
         if let Ok(entries) = fs::read_dir("/media") {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name()
+                    let name = path
+                        .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("Unknown"))
                         .to_string_lossy()
                         .to_string();
-                    
+
                     locations.push(SystemLocation {
                         name,
                         path,
@@ -887,16 +1396,14 @@ async fn load_system_locations() -> Vec<SystemLocation> {
             }
         }
     }
-    
-    // Add important user folders
+
     if let Some(home_dir) = dirs_next::home_dir() {
         locations.push(SystemLocation {
             name: "Home".to_string(),
             path: home_dir.clone(),
             location_type: SystemLocationType::UserFolder,
         });
-        
-        // Add common user folders
+
         let common_folders = [
             ("Bureau", "Bureau"),
             ("Documents", "Documents"),
@@ -905,7 +1412,7 @@ async fn load_system_locations() -> Vec<SystemLocation> {
             ("Images", "Images"),
             ("Vidéos", "Vidéos"),
         ];
-        
+
         for (name, folder) in common_folders.iter() {
             let path = home_dir.join(folder);
             if path.exists() && path.is_dir() {
@@ -917,34 +1424,44 @@ async fn load_system_locations() -> Vec<SystemLocation> {
             }
         }
     }
-    
+
     locations
 }
 
-fn scan_directory(path: &Path, dirs: &mut Vec<DirectoryEntry>, depth: usize, max_depth: usize) {
+fn scan_directory(
+    path: &Path,
+    dirs: &mut Vec<DirectoryEntry>,
+    depth: usize,
+    max_depth: usize,
+    show_hidden: bool,
+) {
     if depth >= max_depth {
         return;
     }
-    
+
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.filter_map(Result::ok) {
             let entry_path = entry.path();
-            
+
             if entry_path.is_dir() {
-                let name = entry_path.file_name()
+                let name = entry_path
+                    .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("Unknown"))
                     .to_string_lossy()
                     .to_string();
-                
+
+                if !show_hidden && name.starts_with('.') {
+                    continue;
+                }
+
                 dirs.push(DirectoryEntry {
                     path: entry_path.clone(),
                     name,
                     depth: depth + 1,
                     expanded: false,
                 });
-                
-                // Recursively scan subdirectories
-                scan_directory(&entry_path, dirs, depth + 1, max_depth);
+
+                scan_directory(&entry_path, dirs, depth + 1, max_depth, show_hidden);
             }
         }
     }
@@ -954,40 +1471,44 @@ async fn load_file_preview(path: PathBuf) -> Option<FilePreview> {
     if !path.is_file() {
         return None;
     }
-    
-    let extension = path.extension()
+
+    let extension = path
+        .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_lowercase();
-    
+
     match extension.as_str() {
-        // Image files
         "jpg" | "jpeg" | "png" | "gif" | "bmp" => {
             if let Ok(bytes) = fs::read(&path) {
                 return Some(FilePreview::Image(image::Handle::from_memory(bytes)));
             }
         }
-        
-        // Text files
+
         "txt" | "md" | "rs" | "toml" | "json" | "yaml" | "yml" | "css" | "html" | "js" | "py" => {
             if let Ok(content) = fs::read_to_string(&path) {
                 return Some(FilePreview::Text(content));
             }
         }
-        
-        // PDF files
+
         "pdf" => {
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            return Some(FilePreview::Pdf(format!("PDF document ({} bytes)\nUse 'Open File' to view", size)));
+            return Some(FilePreview::Pdf(format!(
+                "PDF document ({} bytes)\nUse 'Open File' to view",
+                size
+            )));
         }
-        
-        // Other file types
+
         _ => {
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            return Some(FilePreview::Other(format!("{} file ({} bytes)\nUse 'Open File' to open", extension.to_uppercase(), size)));
+            return Some(FilePreview::Other(format!(
+                "{} file ({} bytes)\nUse 'Open File' to open",
+                extension.to_uppercase(),
+                size
+            )));
         }
     }
-    
+
     None
 }
 
@@ -995,7 +1516,7 @@ fn format_size(size: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    
+
     if size < KB {
         format!("{} B", size)
     } else if size < MB {
@@ -1009,18 +1530,71 @@ fn format_size(size: u64) -> String {
 
 fn format_time(time: SystemTime) -> String {
     use std::time::{Duration, UNIX_EPOCH};
-    
-    let duration = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
+
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0));
     let secs = duration.as_secs();
-    
-    // Basic formatting - in a real app you'd use chrono crate
+
     let seconds = secs % 60;
     let minutes = (secs / 60) % 60;
     let hours = (secs / 3600) % 24;
     let days = (secs / 86400) % 30;
     let months = (secs / 2592000) % 12;
     let years = secs / 31104000;
-    
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", 
-        1970 + years, 1 + months, 1 + days, hours, minutes, seconds)
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        1970 + years,
+        1 + months,
+        1 + days,
+        hours,
+        minutes,
+        seconds
+    )
+}
+
+fn get_file_type(path: &Path) -> FileType {
+    if path.is_dir() {
+        return FileType::Directory;
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match extension.as_str() {
+        // Fichiers de code
+        "rs" | "py" | "js" | "ts" | "java" | "cpp" | "c" | "h" | "hpp" | "cs" | "go" | "php"
+        | "swift" | "kt" => FileType::Code,
+
+        // Fichiers PDF
+        "pdf" => FileType::PDF,
+
+        // Fichiers audio
+        "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => FileType::Audio,
+
+        // Fichiers image
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "ico" => FileType::Image,
+
+        // Fichiers vidéo
+        "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" => FileType::Video,
+
+        // Fichiers texte
+        "txt" | "md" | "json" | "xml" | "yaml" | "yml" | "csv" | "log" => FileType::Text,
+
+        // Fichiers Word
+        "doc" | "docx" => FileType::Word,
+
+        // Fichiers Excel
+        "xls" | "xlsx" | "xlsm" => FileType::Excel,
+
+        // Fichiers PowerPoint
+        "ppt" | "pptx" | "pptm" => FileType::PowerPoint,
+
+        // Autres types
+        _ => FileType::Other,
+    }
 }

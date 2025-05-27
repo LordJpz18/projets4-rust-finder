@@ -1,5 +1,5 @@
 [package]
-name = "FileEx"
+name = "ui_fileex"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,6 @@ edition = "2021"
 iced = { version = "0.12.1", features = ["tokio","image"] }
 tokio = { version = "1", features = ["fs", "rt-multi-thread"] }
 dirs-next = "2.0"
+strsim = "0.10"
+rayon = "1.8"
+walkdir = "2.4"
