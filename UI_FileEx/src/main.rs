@@ -1,6 +1,7 @@
 use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
-use iced::{executor, Application, Command, Element, Length, Settings, Theme};
+use iced::{executor, Application, Command, Element, Font, Length, Settings, Theme};
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use strsim::levenshtein;
 use walkdir::WalkDir;
-use regex::Regex;
 
 fn main() -> iced::Result {
     FileExplorer::run(Settings::default())
@@ -31,6 +31,10 @@ struct FileExplorer {
     search_cache: HashMap<String, (Vec<SearchResult>, Instant)>,
     file_index: HashMap<String, Vec<PathBuf>>,
     last_index_update: Option<Instant>,
+    context_menu: Option<(ContextMenuType, PathBuf)>,
+    rename_input: String,
+    is_renaming: bool,
+    path_to_rename: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +124,12 @@ enum Message {
     ToggleHiddenFiles,
     SearchInputChanged(String),
     ClearSearch,
+    ShowContextMenu(Option<PathBuf>, ContextMenuType),
+    HideContextMenu,
+    RenameFile(PathBuf),
+    RenameInputChanged(String),
+    ConfirmRename,
+    CancelRename,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +144,13 @@ enum FilePreview {
 enum SearchType {
     Fuzzy,
     Regex,
+}
+
+#[derive(Debug, Clone)]
+enum ContextMenuType {
+    File,
+    Directory,
+    Empty,
 }
 
 impl Application for FileExplorer {
@@ -163,6 +180,10 @@ impl Application for FileExplorer {
                 search_cache: HashMap::new(),
                 file_index: HashMap::new(),
                 last_index_update: None,
+                context_menu: None,
+                rename_input: String::new(),
+                is_renaming: false,
+                path_to_rename: None,
             },
             Command::batch(vec![
                 Command::perform(load_files(start_path.clone(), false), Message::FilesLoaded),
@@ -176,7 +197,7 @@ impl Application for FileExplorer {
     }
 
     fn title(&self) -> String {
-        format!("File Explorer - {}", self.current_path.to_string_lossy())
+        String::from("Find-It")
     }
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
@@ -409,10 +430,67 @@ impl Application for FileExplorer {
                 self.search_results.clear();
                 Command::none()
             }
+            Message::ShowContextMenu(path, menu_type) => {
+                self.context_menu = Some((menu_type, path.unwrap_or_else(|| self.current_path.clone())));
+                Command::none()
+            }
+            Message::HideContextMenu => {
+                self.context_menu = None;
+                Command::none()
+            }
+            Message::RenameFile(path) => {
+                self.context_menu = None;
+                self.is_renaming = true;
+                self.path_to_rename = Some(path.clone());
+                self.rename_input = path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                Command::none()
+            }
+            Message::RenameInputChanged(new_name) => {
+                self.rename_input = new_name;
+                Command::none()
+            }
+            Message::ConfirmRename => {
+                if let Some(path) = &self.path_to_rename {
+                    if let Some(parent) = path.parent() {
+                        let new_path = parent.join(&self.rename_input);
+                        let _ = std::fs::rename(path, &new_path);
+                    }
+                }
+                self.is_renaming = false;
+                self.rename_input.clear();
+                self.path_to_rename = None;
+                self.context_menu = None;
+                Command::batch(vec![
+                    Command::perform(
+                        load_files(self.current_path.clone(), self.show_hidden),
+                        Message::FilesLoaded,
+                    ),
+                    Command::perform(
+                        load_directory_structure(self.current_path.clone(), self.show_hidden),
+                        Message::DirectoryStructureLoaded,
+                    ),
+                ])
+            }
+            Message::CancelRename => {
+                self.is_renaming = false;
+                self.rename_input.clear();
+                self.path_to_rename = None;
+                self.context_menu = None;
+                Command::none()
+            }
         }
     }
 
     fn view(&self) -> Element<Message> {
+        let content = if self.is_renaming {
+            self.view_rename_dialog()
+        } else {
+            self.view_main_content()
+        };
+
         let navigation_bar = row![
             text_input("Enter path...", &self.path_input)
                 .on_input(Message::PathInputChanged)
@@ -428,14 +506,146 @@ impl Application for FileExplorer {
             }))
             .on_press(Message::ToggleHiddenFiles)
             .padding(2),
-            text_input("Rechercher des fichiers...", &self.search_input)
+            text_input("Search...", &self.search_input)
                 .on_input(Message::SearchInputChanged)
                 .width(Length::FillPortion(2)),
-            button("Effacer").on_press(Message::ClearSearch).padding(2),
+            button("Erase").on_press(Message::ClearSearch).padding(2),
         ]
         .spacing(5)
         .padding(5);
 
+        column![
+            navigation_bar,
+            container(content).height(Length::Fill).width(Length::Fill)
+        ]
+        .into()
+    }
+}
+
+impl FileExplorer {
+    fn view_rename_dialog(&self) -> Element<Message> {
+        let rename_input = text_input("Enter new name", &self.rename_input)
+            .on_input(Message::RenameInputChanged)
+            .on_submit(Message::ConfirmRename)
+            .padding(10);
+
+        let buttons = row![
+            button("Confirm").on_press(Message::ConfirmRename),
+            button("Cancel").on_press(Message::CancelRename)
+        ]
+        .spacing(10);
+
+        container(
+            column![
+                text("Rename").size(20),
+                rename_input,
+                buttons
+            ]
+            .spacing(10)
+            .padding(20)
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x()
+        .center_y()
+        .into()
+    }
+
+    fn view_context_menu(&self) -> Element<Message> {
+        if let Some((menu_type, path)) = &self.context_menu {
+            let menu_items = match menu_type {
+                ContextMenuType::File => {
+                    column![
+                        button("Open")
+                            .on_press(Message::OpenFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Rename")
+                            .on_press(Message::RenameFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Copy")
+                            .on_press(Message::CopyFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Cut")
+                            .on_press(Message::CutFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Delete")
+                            .on_press(Message::ConfirmDeleteFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill)
+                    ]
+                }
+                ContextMenuType::Directory => {
+                    column![
+                        button("Open")
+                            .on_press(Message::ChangeDirectory(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Rename")
+                            .on_press(Message::RenameFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Copy")
+                            .on_press(Message::CopyFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Cut")
+                            .on_press(Message::CutFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("Delete")
+                            .on_press(Message::ConfirmDeleteFile(path.clone()))
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill)
+                    ]
+                }
+                ContextMenuType::Empty => {
+                    column![
+                        button("New File")
+                            .on_press(Message::CreateFile)
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        button("New Directory")
+                            .on_press(Message::CreateDirectory)
+                            .style(iced::theme::Button::Secondary)
+                            .width(Length::Fill),
+                        if self.clipboard.is_some() {
+                            button("Paste")
+                                .on_press(Message::PasteFile)
+                                .style(iced::theme::Button::Secondary)
+                                .width(Length::Fill)
+                        } else {
+                            button("")
+                                .style(iced::theme::Button::Secondary)
+                                .width(Length::Fill)
+                        }
+                    ]
+                }
+            };
+
+            container(
+                column![
+                    menu_items.spacing(2),
+                    button("Cancel")
+                        .on_press(Message::HideContextMenu)
+                        .style(iced::theme::Button::Secondary)
+                        .width(Length::Fill)
+                ]
+                .spacing(2)
+                .padding(2)
+            )
+            .style(iced::theme::Container::Box)
+            .width(Length::Fixed(150.0))
+            .into()
+        } else {
+            text("").into()
+        }
+    }
+
+    fn view_main_content(&self) -> Element<Message> {
         let content: Element<Message> = if !self.search_results.is_empty() {
             let mut results_list = vec![];
 
@@ -548,14 +758,11 @@ impl Application for FileExplorer {
         };
 
         column![
-            navigation_bar,
             container(content).height(Length::Fill).width(Length::Fill)
         ]
         .into()
     }
-}
 
-impl FileExplorer {
     fn view_directory_structure(&self) -> Element<Message> {
         let tree_title = text("Quick Access")
             .size(16)
@@ -644,12 +851,12 @@ impl FileExplorer {
         }
 
         for location in &self.system_locations {
-            let icon = match location.location_type {
+            /*let icon = match location.location_type {
                 SystemLocationType::Disk => "💾 ",
                 SystemLocationType::UserFolder => "📁 ",
-            };
+            };*/
 
-            let content = row![text(format!("{}{}", icon, location.name))].spacing(5);
+            let content = row![text(format!("{}",location.name))].spacing(5);
 
             let btn = button(content)
                 .on_press(Message::ChangeDirectory(location.path.clone()))
@@ -678,7 +885,7 @@ impl FileExplorer {
 
                 let content = row![
                     container(text(toggle_icon)).width(Length::Fixed(20.0)),
-                    text(format!("📁 {}", dir.name))
+                    text(format!("{}", dir.name))
                 ]
                 .spacing(5);
 
@@ -711,7 +918,8 @@ impl FileExplorer {
             row![
                 text("Name").width(Length::FillPortion(3)),
                 text("Size").width(Length::FillPortion(1)),
-                text("Modified").width(Length::FillPortion(2))
+                text("Modified").width(Length::FillPortion(2)),
+                text("").width(Length::Fixed(30.0)) // Espace pour le bouton de menu
             ]
             .spacing(10)
             .padding(5)
@@ -720,19 +928,24 @@ impl FileExplorer {
 
         if let Some(parent) = self.current_path.parent() {
             file_list.push(
-                button(
-                    row![
-                        image(image::Handle::from_path("icons/folder.png"))
-                            .width(Length::Fixed(20.0))
-                            .height(Length::Fixed(20.0)),
-                        text(".. (Parent Directory)").width(Length::FillPortion(3)),
-                        text("").width(Length::FillPortion(1)),
-                        text("").width(Length::FillPortion(2))
-                    ]
-                    .spacing(10),
-                )
-                .on_press(Message::ChangeDirectory(parent.to_path_buf()))
-                .width(Length::Fill)
+                row![
+                    button(
+                        row![
+                            image(image::Handle::from_path("icons/folder.png"))
+                                .width(Length::Fixed(20.0))
+                                .height(Length::Fixed(20.0)),
+                            text(".. (Parent Directory)").width(Length::FillPortion(3)),
+                            text("").width(Length::FillPortion(1)),
+                            text("").width(Length::FillPortion(2)),
+                            button("⋮")
+                                .on_press(Message::ShowContextMenu(Some(parent.to_path_buf()), ContextMenuType::Directory))
+                                .width(Length::Fixed(30.0))
+                        ]
+                        .spacing(10),
+                    )
+                    .on_press(Message::ChangeDirectory(parent.to_path_buf()))
+                    .width(Length::Fill)
+                ]
                 .into(),
             );
         }
@@ -771,6 +984,17 @@ impl FileExplorer {
                 FileType::Other => "icons/file_generic.png",
             };
 
+            let menu_button = button("≡")
+                .on_press(Message::ShowContextMenu(Some(entry.path.clone()), 
+                    if entry.file_type == FileType::Directory {
+                        ContextMenuType::Directory
+                    } else {
+                        ContextMenuType::File
+                    }
+                ))
+                .style(iced::theme::Button::Secondary)
+                .width(Length::Fixed(30.0));
+
             let row_content = row![
                 image(image::Handle::from_path(icon_path))
                     .width(Length::Fixed(20.0))
@@ -795,7 +1019,15 @@ impl FileExplorer {
                         iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0))
                     } else {
                         iced::theme::Text::Default
-                    })
+                    }),
+                if self.context_menu.as_ref().map_or(false, |(_, p)| p == &entry.path) {
+                    container(self.view_context_menu())
+                        .style(iced::theme::Container::Box)
+                        .width(Length::Fixed(150.0))
+                } else {
+                    container(menu_button)
+                        .width(Length::Fixed(30.0))
+                }
             ]
             .spacing(10);
 
@@ -1186,7 +1418,10 @@ impl FileExplorer {
         ];
 
         // Détecter si la recherche est une regex
-        let search_type = if search_terms.len() == 1 && search_terms[0].starts_with('/') && search_terms[0].ends_with('/') {
+        let search_type = if search_terms.len() == 1
+            && search_terms[0].starts_with('/')
+            && search_terms[0].ends_with('/')
+        {
             SearchType::Regex
         } else {
             SearchType::Fuzzy
@@ -1194,8 +1429,7 @@ impl FileExplorer {
 
         match search_type {
             SearchType::Regex => {
-                // Extraire le pattern regex entre les slashes
-                let pattern = &search_terms[0][1..search_terms[0].len()-1];
+                let pattern = &search_terms[0][1..search_terms[0].len() - 1];
                 if let Ok(regex) = Regex::new(pattern) {
                     for (indexed_term, paths) in &self.file_index {
                         if regex.is_match(indexed_term) {
@@ -1207,13 +1441,12 @@ impl FileExplorer {
                                         .to_string_lossy()
                                         .to_lowercase();
 
-                                    // Calculer un score basé sur la longueur de la correspondance
                                     let matches: Vec<_> = regex.find_iter(&file_name).collect();
                                     let score = if !matches.is_empty() {
-                                        let total_match_length: usize = matches.iter()
-                                            .map(|m| m.end() - m.start())
-                                            .sum();
-                                        (total_match_length as f64 / file_name.len() as f64).min(1.0)
+                                        let total_match_length: usize =
+                                            matches.iter().map(|m| m.end() - m.start()).sum();
+                                        (total_match_length as f64 / file_name.len() as f64)
+                                            .min(1.0)
                                     } else {
                                         0.0
                                     };
@@ -1226,9 +1459,8 @@ impl FileExplorer {
                         }
                     }
                 }
-            },
+            }
             SearchType::Fuzzy => {
-                // Code existant pour la recherche floue
                 for term in search_terms {
                     for (indexed_term, paths) in &self.file_index {
                         let distance = levenshtein(term, indexed_term) as f64;
@@ -1263,8 +1495,10 @@ impl FileExplorer {
                                     let mut match_count = 0;
 
                                     for search_term in search_terms {
-                                        let term_distance = levenshtein(search_term, &file_name) as f64;
-                                        let term_max_len = search_term.len().max(file_name.len()) as f64;
+                                        let term_distance =
+                                            levenshtein(search_term, &file_name) as f64;
+                                        let term_max_len =
+                                            search_term.len().max(file_name.len()) as f64;
                                         let mut term_score = 1.0 - (term_distance / term_max_len);
 
                                         if file_name.starts_with(search_term) {
@@ -1293,7 +1527,8 @@ impl FileExplorer {
                                     }
 
                                     let final_score = if match_count > 0 {
-                                        (total_score / match_count as f64) * 0.7 + (best_score * 0.3)
+                                        (total_score / match_count as f64) * 0.7
+                                            + (best_score * 0.3)
                                     } else {
                                         best_score
                                     };
@@ -1600,19 +1835,19 @@ fn format_size(size: u64) -> String {
 
 fn format_time(time: SystemTime) -> String {
     use std::time::{Duration, UNIX_EPOCH};
-    
+
     let duration = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0));
     let secs = duration.as_secs();
-    
+
     let seconds = secs % 60;
     let minutes = (secs / 60) % 60;
     let hours = (secs / 3600) % 24;
     let days = (secs / 86400) % 30;
     let months = (secs / 2592000) % 12;
-    let years = secs / 31536000; // Correction : utilisation de 365 jours au lieu de 360
-    
+    let years = secs / 31536000;
+
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         1970 + years,
@@ -1637,7 +1872,7 @@ fn get_file_type(path: &Path) -> FileType {
 
     match extension.as_str() {
         "rs" | "py" | "js" | "ts" | "java" | "cpp" | "c" | "h" | "hpp" | "cs" | "go" | "php"
-        | "swift" | "kt" => FileType::Code,
+        | "swift" | "kt" | "html" | "css" | "ml" => FileType::Code,
         "pdf" => FileType::PDF,
         "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => FileType::Audio,
         "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "ico" => FileType::Image,
@@ -1645,7 +1880,7 @@ fn get_file_type(path: &Path) -> FileType {
         "txt" | "md" | "json" | "xml" | "yaml" | "yml" | "csv" | "log" => FileType::Text,
         "doc" | "docx" => FileType::Word,
         "xls" | "xlsx" | "xlsm" => FileType::Excel,
-        "ppt" | "pptx" | "pptm" => FileType::PowerPoint,
+        "ppt" | "pptx" | "pptm" | "key" => FileType::PowerPoint,
         _ => FileType::Other,
     }
 }
