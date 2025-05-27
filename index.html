@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Finder - EPITA Group Project</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <header class="fade-in">
+       	<img src="logo_group.jpg" alt="WandeRust" class="logo animate-logo">
+	<div class="header-text">
+		<h1 class="slide-in">Find-It</h1>
+        	<p class="slide-in-delay">A Rust-based File Explorer by the group WanderRust</p>
+	</div>
+    </header>
+
+    <section id="about" class="section-animate">
+        <h2 class="section-title">About the Project</h2>
+        <p class="section-description">This is a group project developed by four students at EPITA to create a lightweight, efficient file explorer in Rust.</p>
+        <div class="team">
+            <div class="member hover-effect">
+                <h3>Jean Philippe</h3>
+                <div class="photo-container">
+                    <img src="jpz.jpg" alt="Jean Philippe" class="member-photo">
+                </div>
+                <p>Head of the project. Focused on disk logic and traversal algorithms.
+		Main author of the website.</p>
+            </div>
+            <div class="member hover-effect">
+		<h3>Clémence</h3>
+		<div class="photo-container">
+                    <img src="clemence2.jpg" alt="Clémence" class="member-photo">
+                </div>
+                <p>Head of backend. Handled permissions access, file creation and management.</p>
+           </div>
+            <div class="member hover-effect">
+               	<h3>Milan</h3>
+		<div class="photo-container">
+                    <img src="milan.jpg" alt="Milan" class="member-photo">
+                </div>
+                <p>Head of GUI. Designed the user interface and color coding system.</p>
+
+            </div>
+            <div class="member hover-effect">
+                <h3>Guillaume</h3>
+		<div class="photo-container">
+                    <img src="guillaume.jpg" alt="Guillaume" class="member-photo">
+                </div>
+                <p>Multi-task contributor.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="comparison" class="section-animate">
+        <h2 class="section-title">Our Vision Compared to Others</h2>
+        <div class="comparison-grid">
+            <div class="comp-item hover-effect">
+                <h3>macOS Finder</h3>
+                <div class="comp-photo finder-photo"></div>
+                <p><strong>Advantage:</strong> Intuitive UI with Spotlight search.</p>
+                <p><strong>Our Goal:</strong> Add similar intuitive navigation with Rust's speed.</p>
+            </div>
+            <div class="comp-item hover-effect">
+                <h3>Linux Thunar</h3>
+                <div class="comp-photo thunar-photo"></div>
+                <p><strong>Advantage:</strong> Lightweight and customizable.</p>
+                <p><strong>Our Goal:</strong> Match its minimalism with better performance.</p>
+            </div>
+            <div class="comp-item hover-effect">
+                <h3>Windows File Explorer</h3>
+                <div class="comp-photo windows-photo"></div>
+                <p><strong>Advantage:</strong> Broad compatibility and familiar layout.</p>
+                <p><strong>Our Goal:</strong> Improve speed and reduce resource usage.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="why-rust" class="section-animate">
+        <h2 class="section-title">Why Rust?</h2>
+        <p class="section-description">Rust is the perfect choice for our File Finder project because:</p>
+        <ul class="feature-list">
+            <li class="feature-item"><i class="fas fa-bolt"></i> <strong>Performance:</strong> Matches C/C++ speed with zero-cost abstractions.</li>
+            <li class="feature-item"><i class="fas fa-shield-alt"></i> <strong>Safety:</strong> Prevents crashes with memory safety guarantees.</li>
+            <li class="feature-item"><i class="fas fa-code-branch"></i> <strong>Concurrency:</strong> Handles file operations efficiently with safe multithreading.</li>
+            <li class="feature-item"><i class="fas fa-globe"></i> <strong>Cross-Platform:</strong> Runs seamlessly on macOS, Linux, and Windows.</li>
+        </ul>
+    </section>
+
+    <footer class="fade-in">
+        <p>&copy; 2025 WANDERUST x EPITA - Jean Philippe, Clémence, Milan, Guillaume.</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
