@@ -1,13 +1,13 @@
 use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, image, row, scrollable, text, text_input};
 use iced::{executor, Application, Command, Element, Length, Settings, Theme};
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{SystemTime, Duration, Instant};
 use strsim::levenshtein;
 use walkdir::WalkDir;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 fn main() -> iced::Result {
     FileExplorer::run(Settings::default())
@@ -226,9 +226,11 @@ impl Application for FileExplorer {
             }
             Message::ToggleDirectory(index) => {
                 if index < self.directory_structure.len() {
+                    // Toggle the expanded state
                     self.directory_structure[index].expanded =
                         !self.directory_structure[index].expanded;
 
+                    // If we're expanding, we might need to reload the directory structure
                     let root_path = self.directory_structure[0].path.clone();
                     Command::perform(
                         load_directory_structure(root_path, self.show_hidden),
@@ -243,6 +245,7 @@ impl Application for FileExplorer {
                 Command::none()
             }
             Message::OpenFile(path) => {
+                // Use the open command on various platforms
                 #[cfg(target_os = "windows")]
                 {
                     std::process::Command::new("cmd")
@@ -355,7 +358,6 @@ impl Application for FileExplorer {
                             }
                         }
                         ClipboardOperation::Cut => {
-                            //VIPER
                             let _ = std::fs::rename(source_path, &dest_path);
                             self.clipboard = None;
                         }
@@ -384,13 +386,12 @@ impl Application for FileExplorer {
             Message::SearchInputChanged(input) => {
                 self.search_input = input;
                 if !self.search_input.is_empty() {
-                    let search_terms: Vec<String> = self
-                        .search_input
+                    let search_terms: Vec<String> = self.search_input
                         .to_lowercase()
                         .split_whitespace()
                         .map(String::from)
                         .collect();
-
+                    
                     self.search_results = self.search_files(&search_terms);
                 } else {
                     self.search_results.clear();
@@ -414,35 +415,31 @@ impl Application for FileExplorer {
             button(text("Go"))
                 .on_press(Message::NavigateToPath)
                 .padding(2),
-            button(text(if self.show_hidden {
-                "Hide Hidden Files"
-            } else {
-                "Show Hidden Files"
-            }))
-            .on_press(Message::ToggleHiddenFiles)
-            .padding(2),
+            button(text(if self.show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" }))
+                .on_press(Message::ToggleHiddenFiles)
+                .padding(2),
             text_input("Rechercher des fichiers...", &self.search_input)
                 .on_input(Message::SearchInputChanged)
                 .width(Length::FillPortion(2)),
-            button("Effacer").on_press(Message::ClearSearch).padding(2),
+            button("Effacer")
+                .on_press(Message::ClearSearch)
+                .padding(2),
         ]
         .spacing(5)
         .padding(5);
-
+        
         let content: Element<Message> = if !self.search_results.is_empty() {
             let mut results_list = vec![];
-
+            
             for result in &self.search_results {
                 let path = result.path.clone();
                 let score = result.score;
-                let name = path
-                    .file_name()
+                let name = path.file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-
-                let parent = path
-                    .parent()
+                
+                let parent = path.parent()
                     .and_then(|p| p.strip_prefix(&self.current_path).ok())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
@@ -462,73 +459,55 @@ impl Application for FileExplorer {
                     FileType::Other => "icons/file_generic.png",
                 };
 
-                let is_selected = self.selected_file.as_ref().map_or(false, |p| p == &path);
-
                 let message = if file_type == FileType::Directory {
                     Message::ChangeDirectory(path.clone())
                 } else {
                     Message::FileSelected(path.clone())
                 };
-
-                let row_content =
-                    row![
-                        image(image::Handle::from_path(icon_path))
-                            .width(Length::Fixed(20.0))
-                            .height(Length::Fixed(20.0)),
-                        column![
-                            row![
-                                text(name).width(Length::Fill).style(if is_selected {
-                                    iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.6, 0.0))
+                
+                results_list.push(
+                    button(
+                        row![
+                            image(image::Handle::from_path(icon_path))
+                                .width(Length::Fixed(20.0))
+                                .height(Length::Fixed(20.0)),
+                            column![
+                                row![
+                                    text(name)
+                                        .width(Length::Fill)
+                                        .style(iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.0, 0.0))),
+                                    text(format!(" ({:.0}%)", score * 100.0))
+                                        .size(12)
+                                        .style(iced::theme::Text::Color(iced::Color::from_rgb(0.5, 0.5, 0.5)))
+                                ],
+                                if !parent.is_empty() {
+                                    text(format!("📁 {}", parent))
+                                        .size(12)
+                                        .style(iced::theme::Text::Color(iced::Color::from_rgb(0.5, 0.5, 0.5)))
                                 } else {
-                                    iced::theme::Text::Color(iced::Color::from_rgb(0.0, 0.0, 0.0))
-                                }),
-                                text(format!(" ({:.0}%)", score * 100.0)).size(12).style(
-                                    iced::theme::Text::Color(iced::Color::from_rgb(0.5, 0.5, 0.5))
-                                )
-                            ],
-                            if !parent.is_empty() {
-                                text(format!("📍 {}", parent)).size(12).style(
-                                    iced::theme::Text::Color(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-                                )
-                            } else {
-                                text("")
-                            }
+                                    text("")
+                                }
+                            ]
+                            .spacing(2)
                         ]
-                        .spacing(2)
-                    ]
-                    .spacing(10)
-                    .padding(5);
-
-                let btn = button(row_content)
+                        .spacing(10)
+                        .padding(5)
+                    )
                     .on_press(message)
-                    .style(if is_selected {
-                        iced::theme::Button::Positive
-                    } else {
-                        iced::theme::Button::Secondary
-                    })
-                    .width(Length::Fill);
-
-                results_list.push(btn.into());
+                    .style(iced::theme::Button::Secondary)
+                    .width(Length::Fill)
+                    .into()
+                );
             }
-
-            // Ajout de la zone de détails pour le fichier sélectionné dans les résultats
-            let details = if self.selected_file.is_some() && !self.search_results.is_empty() {
-                self.view_file_details()
-            } else {
-                container(text("Aucun fichier sélectionné")).into()
-            };
-
-            row![
+            
+            scrollable(
                 container(
-                    scrollable(container(column(results_list).spacing(5)).padding(10))
-                        .height(Length::Fill)
+                    column(results_list)
+                        .spacing(5)
                 )
-                .width(Length::FillPortion(2)),
-                container(details)
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill)
-            ]
-            .spacing(10)
+                .padding(10)
+            )
+            .height(Length::Fill)
             .into()
         } else {
             row![
@@ -539,10 +518,12 @@ impl Application for FileExplorer {
             .spacing(10)
             .into()
         };
-
+        
         column![
             navigation_bar,
-            container(content).height(Length::Fill).width(Length::Fill)
+            container(content)
+                .height(Length::Fill)
+                .width(Length::Fill)
         ]
         .into()
     }
@@ -935,14 +916,16 @@ impl FileExplorer {
     fn update_file_index(&mut self) {
         let now = Instant::now();
         if let Some(last_update) = self.last_index_update {
-            if now.duration_since(last_update) < Duration::from_secs(300) {
+            if now.duration_since(last_update) < Duration::from_secs(300) { // 5 minutes
                 return;
             }
         }
 
         self.file_index.clear();
 
+        // Liste des dossiers et fichiers à ignorer
         let ignored_patterns = [
+            // Dossiers de développement
             "/.git/",
             "/node_modules/",
             "/target/",
@@ -950,6 +933,8 @@ impl FileExplorer {
             "/dist/",
             "/.idea/",
             "/.vscode/",
+            
+            // Dossiers d'applications et GitHub
             "github",
             "GitHub",
             "GITHUB",
@@ -1066,6 +1051,8 @@ impl FileExplorer {
             "Terminal.app/",
             "Time Machine.app/",
             "Voice Memos.app/",
+            
+            // Fichiers système et temporaires
             "/.DS_Store",
             "/Thumbs.db",
             "*.tmp",
@@ -1082,61 +1069,66 @@ impl FileExplorer {
             .filter_entry(|entry| {
                 let path = entry.path().to_string_lossy().to_lowercase();
                 let file_name = entry.file_name().to_string_lossy().to_lowercase();
-
+                
+                // Vérifier si le chemin ou le nom de fichier contient des patterns à ignorer
                 let should_ignore = ignored_patterns.iter().any(|pattern| {
-                    path.contains(&pattern.to_lowercase())
-                        || file_name.contains(&pattern.to_lowercase())
+                    path.contains(&pattern.to_lowercase()) || 
+                    file_name.contains(&pattern.to_lowercase())
                 });
 
-                let is_app_extension = file_name.ends_with(".app")
-                    || file_name.ends_with(".exe")
-                    || file_name.ends_with(".dmg")
-                    || file_name.ends_with(".pkg");
+                // Vérifier les extensions d'applications
+                let is_app_extension = file_name.ends_with(".app") || 
+                                     file_name.ends_with(".exe") || 
+                                     file_name.ends_with(".dmg") || 
+                                     file_name.ends_with(".pkg");
 
-                let is_app_folder = path.contains("/applications/")
-                    || path.contains("/program files/")
-                    || path.contains("/program files (x86)/")
-                    || path.contains("/library/application support/");
+                // Vérifier si c'est un dossier d'application
+                let is_app_folder = path.contains("/applications/") || 
+                                  path.contains("/program files/") || 
+                                  path.contains("/program files (x86)/") ||
+                                  path.contains("/library/application support/");
 
                 !should_ignore && !is_app_extension && !is_app_folder
             });
 
         for entry in walker.filter_map(Result::ok) {
             let path = entry.path();
-            let file_name = path
-                .file_name()
+            let file_name = path.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_lowercase();
 
+            // Ignorer les fichiers cachés si show_hidden est false
             if !self.show_hidden && file_name.starts_with('.') {
                 continue;
             }
 
-            if file_name.ends_with(".app")
-                || file_name.ends_with(".exe")
-                || file_name.ends_with(".dmg")
-                || file_name.ends_with(".pkg")
-            {
+            // Ignorer les fichiers d'applications
+            if file_name.ends_with(".app") || 
+               file_name.ends_with(".exe") || 
+               file_name.ends_with(".dmg") || 
+               file_name.ends_with(".pkg") {
                 continue;
             }
 
+            // Ignorer les dossiers d'applications
             let path_str = path.to_string_lossy().to_lowercase();
-            if path_str.contains("/applications/")
-                || path_str.contains("/program files/")
-                || path_str.contains("/program files (x86)/")
-                || path_str.contains("/library/application support/")
-            {
+            if path_str.contains("/applications/") || 
+               path_str.contains("/program files/") || 
+               path_str.contains("/program files (x86)/") ||
+               path_str.contains("/library/application support/") {
                 continue;
             }
 
+            // Indexer le nom complet du fichier
             self.file_index
                 .entry(file_name.clone())
                 .or_insert_with(Vec::new)
                 .push(path.to_path_buf());
 
+            // Indexer chaque mot du nom de fichier
             for word in file_name.split(|c: char| !c.is_alphanumeric()) {
-                if !word.is_empty() && word.len() > 1 {
+                if !word.is_empty() && word.len() > 1 { // Ignorer les mots trop courts
                     self.file_index
                         .entry(word.to_string())
                         .or_insert_with(Vec::new)
@@ -1149,11 +1141,7 @@ impl FileExplorer {
     }
 
     fn search_files(&mut self, search_terms: &[String]) -> Vec<SearchResult> {
-        let cache_key = format!(
-            "{}_{}",
-            self.current_path.to_string_lossy(),
-            search_terms.join(" ")
-        );
+        let cache_key = format!("{}_{}", self.current_path.to_string_lossy(), search_terms.join(" "));
         if let Some((cached_results, timestamp)) = self.search_cache.get(&cache_key) {
             if Instant::now().duration_since(*timestamp) < Duration::from_secs(60) {
                 return cached_results.clone();
@@ -1166,6 +1154,7 @@ impl FileExplorer {
         let mut seen_paths = HashSet::new();
         let mut path_scores = HashMap::new();
 
+        // Prioriser les dossiers importants
         let important_folders = [
             "Documents",
             "Downloads",
@@ -1184,16 +1173,15 @@ impl FileExplorer {
                 let max_len = term.len().max(indexed_term.len()) as f64;
                 let mut score = 1.0 - (distance / max_len);
 
+                // Bonus pour les correspondances exactes
                 if indexed_term == term {
                     score *= 1.5;
                 }
 
+                // Bonus pour les dossiers importants
                 if let Some(file_name) = paths[0].file_name() {
                     let name = file_name.to_string_lossy().to_lowercase();
-                    if important_folders
-                        .iter()
-                        .any(|&folder| name.contains(folder))
-                    {
+                    if important_folders.iter().any(|&folder| name.contains(folder)) {
                         score *= 1.3;
                     }
                 }
@@ -1201,8 +1189,7 @@ impl FileExplorer {
                 if score >= 0.3 {
                     for path in paths {
                         if seen_paths.insert(path.clone()) {
-                            let file_name = path
-                                .file_name()
+                            let file_name = path.file_name()
                                 .unwrap_or_default()
                                 .to_string_lossy()
                                 .to_lowercase();
@@ -1216,20 +1203,18 @@ impl FileExplorer {
                                 let term_max_len = search_term.len().max(file_name.len()) as f64;
                                 let mut term_score = 1.0 - (term_distance / term_max_len);
 
+                                // Bonus pour les correspondances au début du nom
                                 if file_name.starts_with(search_term) {
                                     term_score *= 1.2;
                                 }
 
+                                // Bonus pour les correspondances dans les dossiers importants
                                 if let Some(parent) = path.parent() {
-                                    let parent_name = parent
-                                        .file_name()
+                                    let parent_name = parent.file_name()
                                         .unwrap_or_default()
                                         .to_string_lossy()
                                         .to_lowercase();
-                                    if important_folders
-                                        .iter()
-                                        .any(|&folder| parent_name.contains(folder))
-                                    {
+                                    if important_folders.iter().any(|&folder| parent_name.contains(folder)) {
                                         term_score *= 1.1;
                                     }
                                 }
@@ -1248,7 +1233,7 @@ impl FileExplorer {
                             };
 
                             let final_score = final_score.min(1.0).max(0.0);
-
+                            
                             if final_score >= 0.3 {
                                 path_scores.insert(path.clone(), final_score);
                             }
@@ -1259,18 +1244,16 @@ impl FileExplorer {
         }
 
         for (path, score) in path_scores {
-            results.push(SearchResult { path, score });
+            results.push(SearchResult {
+                path,
+                score,
+            });
         }
 
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(100);
 
-        self.search_cache
-            .insert(cache_key, (results.clone(), Instant::now()));
+        self.search_cache.insert(cache_key, (results.clone(), Instant::now()));
 
         results
     }
@@ -1583,16 +1566,35 @@ fn get_file_type(path: &Path) -> FileType {
         .to_lowercase();
 
     match extension.as_str() {
+        // Fichiers de code
         "rs" | "py" | "js" | "ts" | "java" | "cpp" | "c" | "h" | "hpp" | "cs" | "go" | "php"
         | "swift" | "kt" => FileType::Code,
+
+        // Fichiers PDF
         "pdf" => FileType::PDF,
+
+        // Fichiers audio
         "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => FileType::Audio,
+
+        // Fichiers image
         "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "ico" => FileType::Image,
+
+        // Fichiers vidéo
         "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" => FileType::Video,
+
+        // Fichiers texte
         "txt" | "md" | "json" | "xml" | "yaml" | "yml" | "csv" | "log" => FileType::Text,
+
+        // Fichiers Word
         "doc" | "docx" => FileType::Word,
+
+        // Fichiers Excel
         "xls" | "xlsx" | "xlsm" => FileType::Excel,
+
+        // Fichiers PowerPoint
         "ppt" | "pptx" | "pptm" => FileType::PowerPoint,
+
+        // Autres types
         _ => FileType::Other,
     }
 }
