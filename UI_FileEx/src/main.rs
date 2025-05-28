@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use strsim::levenshtein;
 use walkdir::WalkDir;
+use std::os::unix::fs::PermissionsExt;
 
 fn main() -> iced::Result {
     FileExplorer::run(Settings::default())
@@ -83,6 +84,7 @@ struct FileEntry {
     size: u64,
     modified: Option<SystemTime>,
     file_type: FileType,
+    permissions: String,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,8 @@ enum Message {
     RenameInputChanged(String),
     ConfirmRename,
     CancelRename,
+    RenameInputChanged1(String),
+    RenameFile1(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -481,9 +485,29 @@ impl Application for FileExplorer {
                 self.context_menu = None;
                 Command::none()
             }
+            Message::RenameInputChanged1(input) => {
+                self.rename_input = input;
+                Command::none()
+            }
+            Message::RenameFile1(old_path) => {
+                if let Some(parent) = old_path.parent() {
+                let new_path = parent.join(&self.rename_input);
+                if let Err(err) = fs::rename(&old_path, &new_path) {
+                    eprintln!("Rename error: {}", err);
+                } else {
+                    self.rename_input.clear();
+                    self.selected_file = Some(new_path.clone());
+
+                    return Command::perform(
+                        load_files(self.current_path.clone(), self.show_hidden),
+                        Message::FilesLoaded,
+                    );
+                }
+            }
+            Command::none()
+        }
         }
     }
-
     fn view(&self) -> Element<Message> {
         let content = if self.is_renaming {
             self.view_rename_dialog()
@@ -520,6 +544,7 @@ impl Application for FileExplorer {
         ]
         .into()
     }
+    
 }
 
 impl FileExplorer {
@@ -1055,13 +1080,32 @@ impl FileExplorer {
 
     fn view_file_details(&self) -> Element<Message> {
         let mut details = vec![];
+        if let Some(selected_path) = &self.selected_file {
+            let rename_input = text_input("New name", &self.rename_input)
+                .on_input(Message::RenameInputChanged1)
+                .padding(10)
+                .width(Length::Fill);
 
-        details.push(
-            text("File Details")
-                .size(16)
-                .horizontal_alignment(Horizontal::Center)
+            let rename_button = button("Rename")
+                .on_press(Message::RenameFile1(selected_path.clone()))
+                .padding(8);
+
+            details.push(
+                column![
+                    text("Rename the file").size(16),
+                    rename_input,
+                    rename_button
+                ]
+                .spacing(10)
                 .into(),
-        );
+            );
+            details.push(
+                text("File Details")
+                    .size(16)
+                    .horizontal_alignment(Horizontal::Center)
+                    .into(),
+            );
+        }
 
         if let Some(selected_path) = &self.selected_file {
             let file_name = selected_path
@@ -1084,6 +1128,8 @@ impl FileExplorer {
                 if let Ok(time) = metadata.modified() {
                     details.push(text(format!("Modified: {}", format_time(time))).into());
                 }
+                let permissions = get_permissions_string(&metadata);
+                details.push(text(format!("File Permissions: {}", permissions)).into());
             }
 
             if let Some(path) = &self.confirm_delete {
@@ -1107,13 +1153,23 @@ impl FileExplorer {
                     .width(Length::Fill)
                     .into(),
                 );
-            } else if let Some(selected_path) = &self.selected_file {
-                details.push(
-                    button(text("Open File"))
-                        .on_press(Message::OpenFile(selected_path.clone()))
-                        .padding(5)
-                        .into(),
-                );
+            } 
+            if let Some(file_entry) = self.files.iter().find(|f| f.path == *selected_path) {
+                if file_entry.permissions.contains("r") {
+                    details.push(
+                        button(text("Open File"))
+                            .on_press(Message::OpenFile(selected_path.clone()))
+                            .padding(5)
+                            .into(),
+                    );
+                } else {
+                    details.push(
+                        text("You don't have permission to read this file.")
+                            .size(14)
+                            .style(iced::theme::Text::Color([0.8, 0.2, 0.2].into()))
+                            .into(),
+                    );
+                }
 
                 details.push(
                     button(text("Delete file"))
@@ -1584,6 +1640,32 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn get_permissions_string(metadata: &fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode();
+    let r;
+    let w;
+    let x;
+    if mode & 0o400 != 0 {
+        r = "r";
+    } else {
+        r = "-";
+    }
+    if mode & 0o200 != 0 {
+        w = "w";
+    } else {
+        w = "-";
+    }
+    if mode & 0o100 != 0 {
+        x = "x";
+    } else {
+        x = "-";
+    }
+
+    format!("{}{}{}", r, w, x)
+}
+
+
 async fn load_files(path: PathBuf, show_hidden: bool) -> Vec<FileEntry> {
     fs::read_dir(&path)
         .map(|entries| {
@@ -1605,12 +1687,17 @@ async fn load_files(path: PathBuf, show_hidden: bool) -> Vec<FileEntry> {
                 .map(|entry| {
                     let path = entry.path();
                     let metadata = fs::metadata(&path).ok();
+                    let permissions = metadata
+                        .as_ref()
+                        .map(get_permissions_string)
+                        .unwrap_or_else(|| "---".to_string());
 
                     FileEntry {
                         path: path.clone(),
                         size: metadata.as_ref().map_or(0, |m| m.len()),
                         modified: metadata.and_then(|m| m.modified().ok()),
                         file_type: get_file_type(&path),
+                        permissions,
                     }
                 })
                 .collect()
@@ -1775,6 +1862,13 @@ fn scan_directory(
 async fn load_file_preview(path: PathBuf) -> Option<FilePreview> {
     if !path.is_file() {
         return None;
+    }
+
+    let metadata = fs::metadata(&path).ok()?;
+    let mode = metadata.permissions().mode();
+
+    if mode & 0o400 == 0{
+        return Some(FilePreview::Other("File is not readable".into()));
     }
 
     let extension = path
